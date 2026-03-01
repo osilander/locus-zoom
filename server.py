@@ -354,6 +354,43 @@ def ensure_alignment_index(path: Path) -> Path:
     raise ValueError(f"Missing alignment index for {path.name}. Expected one of: {expected}")
 
 
+def create_fasta_index(path: Path):
+    ensure_file_exists(path, "Reference FASTA")
+    fai = Path(f"{path}.fai")
+    if fai.exists():
+        return None
+    if available_backend() == "pysam":
+        pysam.faidx(str(path))
+    else:
+        run_samtools(["faidx", str(path)])
+    return fai
+
+
+def create_alignment_index(path: Path):
+    ensure_file_exists(path, "Alignment file")
+    existing = next((candidate for candidate in bam_index_candidates(path) if candidate.exists()), None)
+    if existing:
+        return None
+    if available_backend() == "pysam":
+        pysam.index(str(path))
+    else:
+        run_samtools(["index", str(path)])
+    return next((candidate for candidate in bam_index_candidates(path) if candidate.exists()), None)
+
+
+def create_missing_indexes(session: "SessionConfig") -> List[str]:
+    created: List[str] = []
+    if session.reference:
+        created_path = create_fasta_index(session.reference)
+        if created_path:
+            created.append(str(created_path))
+    for bam in session.bams or []:
+        created_path = create_alignment_index(bam)
+        if created_path:
+            created.append(str(created_path))
+    return created
+
+
 def parse_sequence_headers_from_sam(header_text: str) -> Dict[str, int]:
     contigs: Dict[str, int] = {}
     for line in header_text.splitlines():
@@ -486,6 +523,37 @@ def build_validated_snapshot(session: "SessionConfig") -> Dict:
         if gff_path.suffix.lower() == ".gtf":
             raise ValueError("GTF is not supported yet. Use GFF/GFF3 for now.")
         validate_contig_names("Annotation file", read_gff_contigs(gff_path), reference_contigs)
+
+    return {
+        "reference": str(reference_path),
+        "bam": str(bam_paths[0]) if bam_paths else None,
+        "bams": [str(path) for path in bam_paths],
+        "vcf": str(vcf_path) if vcf_path else None,
+        "gff": str(gff_path) if gff_path else None,
+        "contigs": contig_entries,
+    }
+
+
+def build_lightweight_snapshot(session: "SessionConfig") -> Dict:
+    reference_path = ensure_file_exists(session.reference, "Reference FASTA")
+    contig_entries = read_fasta_index(reference_path)
+    if not contig_entries:
+        raise ValueError(f"Reference FASTA index is empty: {reference_path}.fai")
+
+    # Keep session load lightweight for large/remote datasets. Validate only
+    # the reference (needed for contigs) and defer BAM/VCF/GFF file checks
+    # until the first locus query touches those resources.
+    bam_paths = [configured_bam for configured_bam in (session.bams or []) if configured_bam]
+
+    vcf_path = session.vcf
+    if vcf_path:
+        if vcf_path.suffix.lower() == ".gz":
+            raise ValueError("Compressed VCF (.vcf.gz) is not supported yet. Use an uncompressed .vcf for now.")
+
+    gff_path = session.gff
+    if gff_path:
+        if gff_path.suffix.lower() == ".gtf":
+            raise ValueError("GTF is not supported yet. Use GFF/GFF3 for now.")
 
     return {
         "reference": str(reference_path),
@@ -742,9 +810,29 @@ def read_depth_coverage(path: Path, contig: str, start: int, end: int) -> List[D
             }
             for position in range(start, end + 1)
         ]
-    # For the external samtools backend, reuse parsed reads so exact coverage can
-    # include per-base composition for the coverage renderer.
-    return compute_coverage(read_alignment_records(path, contig, start, end), start, end)
+    region = f"{contig}:{start}-{end}"
+    output = run_samtools(["depth", "-a", "-r", region, str(path)])
+    depths_by_position: Dict[int, int] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) < 3:
+            continue
+        try:
+            position = int(fields[1])
+            depth = int(fields[2])
+        except ValueError:
+            continue
+        depths_by_position[position] = depth
+    return [
+        {
+            "position": position,
+            "depth": depths_by_position.get(position, 0),
+            "counts": empty_base_counts(),
+        }
+        for position in range(start, end + 1)
+    ]
 
 
 def parse_sam_span(line: str) -> Dict:
@@ -1080,6 +1168,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.handle_session_load()
                 return
 
+            if parsed.path == "/api/session/indexes" and method == "POST":
+                self.handle_session_indexes()
+                return
+
             if parsed.path == "/api/reference" and method == "GET":
                 self.handle_reference(parsed)
                 return
@@ -1124,11 +1216,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         global SESSION
         payload = self.read_json_body()
         proposed = SESSION.with_updates(payload)
-        snapshot = build_validated_snapshot(proposed)
+        snapshot = build_lightweight_snapshot(proposed)
         if not snapshot["contigs"]:
             raise ValueError("Reference FASTA with .fai index is required")
         SESSION = proposed
         self.write_json(snapshot)
+
+    def handle_session_indexes(self):
+        payload = self.read_json_body()
+        proposed = SESSION.with_updates(payload)
+        created = create_missing_indexes(proposed)
+        self.write_json(
+            {
+                "created": created,
+                "count": len(created),
+            }
+        )
 
     def handle_reference(self, parsed):
         query = urllib.parse.parse_qs(parsed.query)
@@ -1194,16 +1297,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 reads = []
                 if bins > 0:
-                    if available_backend() == "pysam":
-                        coverage = summarize_coverage_points(
-                            read_depth_coverage(bam, contig, start, end),
-                            start,
-                            end,
-                            bins,
-                        )
-                    else:
-                        output = run_samtools(["view", str(bam), region])
-                        coverage = summarize_coverage_from_sam(output, start, end, bins)
+                    coverage = summarize_coverage_points(
+                        read_depth_coverage(bam, contig, start, end),
+                        start,
+                        end,
+                        bins,
+                    )
                 else:
                     coverage = read_depth_coverage(bam, contig, start, end)
                 truncated = False

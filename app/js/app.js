@@ -1,4 +1,4 @@
-import { fetchAlignments, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
+import { createSessionIndexes, fetchAlignments, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
 import { canResolveNativePaths, extractDroppedPaths, inferFileSlots } from "./desktop-bridge.js";
 import { renderAnnotations, renderCoverage, renderNavigator, renderReads, renderReference, renderSummary, renderVariantDetail, renderVariantList, renderVariants } from "./renderers.js";
 import { createStore, normalizeWindow, parseLocus } from "./state.js";
@@ -31,6 +31,9 @@ const store = createStore({
 
 const elements = {
   status: document.querySelector("#status-pill"),
+  statusLabel: document.querySelector("#status-pill-label"),
+  statusProgress: document.querySelector("#status-pill-progress"),
+  statusProgressBar: document.querySelector("#status-pill-progress-bar"),
   windowLabel: document.querySelector("#window-label"),
   contigSelect: document.querySelector("#contig-select"),
   startInput: document.querySelector("#start-input"),
@@ -60,6 +63,11 @@ const elements = {
   vcfPathInput: document.querySelector("#vcf-path-input"),
   gffPathInput: document.querySelector("#gff-path-input"),
   loadDataButton: document.querySelector("#load-data-button"),
+  confirmModal: document.querySelector("#confirm-modal"),
+  confirmModalTitle: document.querySelector("#confirm-modal-title"),
+  confirmModalMessage: document.querySelector("#confirm-modal-message"),
+  confirmModalConfirm: document.querySelector("#confirm-modal-confirm"),
+  confirmModalCancel: document.querySelector("#confirm-modal-cancel"),
 };
 
 let sharedScrollLeft = 0;
@@ -73,6 +81,7 @@ const REFERENCE_SEQUENCE_MAX_BASES = 5000;
 const COVERAGE_BIN_THRESHOLD = 5000;
 const COVERAGE_BIN_COUNT = 900;
 const READ_AUTOLOAD_MAX_BASES = 10000;
+const INITIAL_SESSION_WINDOW_BASES = 10000;
 const WINDOW_CACHE_LIMIT = 18;
 const REFRESH_DEBOUNCE_MS = 90;
 const windowCache = {
@@ -140,10 +149,33 @@ function applyPendingViewportCenter(state = store.getState()) {
   applySharedScroll();
 }
 
-function setStatus(message, isError = false) {
-  elements.status.textContent = message;
+function setStatus(message, isError = false, options = {}) {
+  const { progress = null, loading = null } = options;
+  const showProgress = loading ?? (!isError && /^(Loading|Creating)/.test(String(message || "")));
+  const normalizedProgress = typeof progress === "number"
+    ? Math.max(0, Math.min(1, progress))
+    : null;
+
+  elements.statusLabel.textContent = message;
   elements.status.style.background = isError ? "rgba(181,71,45,0.14)" : "rgba(43,106,71,0.12)";
   elements.status.style.color = isError ? "#8a2a16" : "#1e5336";
+
+  if (!showProgress) {
+    elements.statusProgress.hidden = true;
+    elements.statusProgressBar.classList.remove("is-indeterminate");
+    elements.statusProgressBar.style.width = "0%";
+    return;
+  }
+
+  elements.statusProgress.hidden = false;
+  if (normalizedProgress == null) {
+    elements.statusProgressBar.classList.add("is-indeterminate");
+    elements.statusProgressBar.style.width = "";
+    return;
+  }
+
+  elements.statusProgressBar.classList.remove("is-indeterminate");
+  elements.statusProgressBar.style.width = `${Math.round(normalizedProgress * 100)}%`;
 }
 
 function isAbortError(error) {
@@ -269,11 +301,37 @@ async function refreshWindow() {
   const coverageBins = windowWidth > COVERAGE_BIN_THRESHOLD ? COVERAGE_BIN_COUNT : 0;
   const shouldFetchReferenceSequence = windowWidth <= REFERENCE_SEQUENCE_MAX_BASES;
   const signal = activeWindowController.signal;
+  const referenceOverview = {
+    contig: state.contig,
+    start: state.start,
+    end: state.end,
+    sequence: "",
+  };
+  const pendingAlignments = {
+    contig: state.contig,
+    start: state.start,
+    end: state.end,
+    tracks: [],
+    truncated: false,
+    totalReadCount: 0,
+    readsLoaded: false,
+    coverageBinned: coverageBins > 0,
+  };
 
   const requestToken = refreshToken + 1;
   refreshToken = requestToken;
 
-  setStatus("Loading coverage");
+  if (!shouldFetchReferenceSequence) {
+    store.setState({
+      reference: referenceOverview,
+      alignments: state.alignments || pendingAlignments,
+      variants: state.variants || [],
+      nearbyVariants: state.nearbyVariants || [],
+      annotations: state.annotations || [],
+    });
+  }
+
+  setStatus("Loading coverage", false, { progress: 0.65, loading: true });
   try {
     const referenceKey = windowKey(state, `ref:${shouldFetchReferenceSequence ? "seq" : "overview"}`);
     const coverageKey = windowKey(state, `cov:${coverageBins}`);
@@ -289,12 +347,7 @@ async function refreshWindow() {
       cachedReference || (
         shouldFetchReferenceSequence
           ? fetchReference(state.contig, state.start, state.end, { signal })
-          : Promise.resolve({
-              contig: state.contig,
-              start: state.start,
-              end: state.end,
-              sequence: "",
-            })
+          : Promise.resolve(referenceOverview)
       ),
       cachedCoverage || fetchAlignments(state.contig, state.start, state.end, { includeReads: false, bins: coverageBins, signal }),
       cachedVariants || fetchVariants(state.contig, state.start, state.end, { signal }),
@@ -326,52 +379,9 @@ async function refreshWindow() {
       trackOrder: trackUiState.trackOrder,
       collapsedTracks: trackUiState.collapsedTracks,
       coverageOnlyTracks: trackUiState.coverageOnlyTracks,
-      loadingReads: shouldFetchReads(trackUiState, state),
-    });
-
-    if (!shouldFetchReads(trackUiState, state)) {
-      setStatus("Loaded locus");
-      return;
-    }
-
-    setStatus("Loaded coverage, loading reads");
-
-    const readsKey = windowKey(state, "reads");
-    const cachedReads = getCached(windowCache.reads, readsKey);
-    if (cachedReads) {
-      store.setState({
-        alignments: cachedReads,
-        loadingReads: false,
-      });
-      setStatus(
-        cachedReads.truncated
-          ? "Loaded locus (read list truncated for display)"
-          : "Loaded locus"
-      );
-      return;
-    }
-
-    activeReadsController = new AbortController();
-    const readAlignments = await fetchAlignments(state.contig, state.start, state.end, {
-      includeReads: true,
-      signal: activeReadsController.signal,
-    });
-    if (requestToken !== refreshToken) {
-      return;
-    }
-    activeReadsController = null;
-    setCached(windowCache.reads, readsKey, readAlignments);
-
-    store.setState({
-      alignments: readAlignments,
       loadingReads: false,
     });
-
-    setStatus(
-      readAlignments.truncated
-        ? "Loaded locus (read list truncated for display)"
-        : "Loaded locus"
-    );
+    setStatus("Loaded locus");
   } catch (error) {
     if (isAbortError(error)) {
       return;
@@ -475,11 +485,17 @@ function renderAlignmentTracks(state) {
     </div>
   `;
   const bulkControls = bulkCard.querySelector(".track-header-controls");
-  const bulkToggle = document.createElement("button");
-  bulkToggle.type = "button";
-  bulkToggle.className = "track-inline-button";
-  bulkToggle.textContent = allTracksCoverageOnly(tracks, state) ? "Show All Reads" : "Coverage Only All";
-  bulkToggle.addEventListener("click", () => toggleAllCoverageOnly(tracks));
+  const bulkPrimaryButton = document.createElement("button");
+  bulkPrimaryButton.type = "button";
+  bulkPrimaryButton.className = "track-inline-button";
+  if (state.alignments?.readsLoaded === false) {
+    bulkPrimaryButton.textContent = "Load Reads In View";
+    bulkPrimaryButton.disabled = Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES || state.loadingReads;
+    bulkPrimaryButton.addEventListener("click", () => loadReadsForCurrentWindow());
+  } else {
+    bulkPrimaryButton.textContent = allTracksCoverageOnly(tracks, state) ? "Show All Reads" : "Coverage Only All";
+    bulkPrimaryButton.addEventListener("click", () => toggleAllCoverageOnly(tracks));
+  }
   const filterSecondaryButton = document.createElement("button");
   filterSecondaryButton.type = "button";
   filterSecondaryButton.className = "track-inline-button";
@@ -520,7 +536,7 @@ function renderAlignmentTracks(state) {
   coverageScaleButton.className = "track-inline-button";
   coverageScaleButton.textContent = state.coverageLogScale ? "Coverage: Log" : "Coverage: Linear";
   coverageScaleButton.addEventListener("click", toggleCoverageScale);
-  bulkControls.appendChild(bulkToggle);
+  bulkControls.appendChild(bulkPrimaryButton);
   bulkControls.appendChild(sortSelect);
   bulkControls.appendChild(groupSelect);
   bulkControls.appendChild(coverageScaleButton);
@@ -544,7 +560,7 @@ function renderAlignmentTracks(state) {
     meta.textContent = state.loadingReads
       ? "Coverage loaded, reads loading"
       : state.alignments.readsLoaded === false
-        ? `Coverage only (${Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES ? "zoom in to load reads" : "reads not loaded"})`
+        ? `Coverage only (${Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES ? `zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to load reads` : "click Load Reads for this locus"})`
         : track.truncated
         ? `${track.reads.length} reads shown of ${track.totalReadCount}`
         : `${track.totalReadCount} reads shown`;
@@ -561,9 +577,15 @@ function renderAlignmentTracks(state) {
     const readsButton = document.createElement("button");
     readsButton.type = "button";
     readsButton.className = "track-inline-button";
-    readsButton.textContent = state.coverageOnlyTracks?.[track.path] ? "Show Reads" : "Coverage Only";
-    readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]);
-    readsButton.addEventListener("click", () => toggleCoverageOnly(track.path));
+    if (state.alignments?.readsLoaded === false) {
+      readsButton.textContent = "Load Reads";
+      readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]) || state.loadingReads || Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES;
+      readsButton.addEventListener("click", () => loadReadsForCurrentWindow());
+    } else {
+      readsButton.textContent = state.coverageOnlyTracks?.[track.path] ? "Show Reads" : "Coverage Only";
+      readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]);
+      readsButton.addEventListener("click", () => toggleCoverageOnly(track.path));
+    }
 
     const upButton = document.createElement("button");
     upButton.type = "button";
@@ -607,7 +629,7 @@ function renderAlignmentTracks(state) {
 
     if (!isCollapsed) {
       card.appendChild(coverageBody);
-      if (!isCoverageOnly && !state.loadingReads) {
+      if (!isCoverageOnly) {
         card.appendChild(readsBody);
       }
     }
@@ -625,7 +647,7 @@ function renderAlignmentTracks(state) {
           logScale: state.coverageLogScale,
         }
       );
-      if (!isCoverageOnly && !state.loadingReads) {
+      if (!isCoverageOnly) {
         const visibleReads = filterReads(track.reads, state.readFilters);
         const sortedGroupedReads = organizeReadsForDisplay(visibleReads, state);
         renderReads(
@@ -633,11 +655,15 @@ function renderAlignmentTracks(state) {
           sortedGroupedReads,
           state.reference,
           state.variants,
-          state.selectedVariant,
+            state.selectedVariant,
           {
             cursorPosition: sortCursorPosition(state),
-            emptyMessage: state.alignments.readsLoaded === false
-              ? `Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to view reads`
+            emptyMessage: state.loadingReads
+              ? "Loading reads for this locus..."
+              : state.alignments.readsLoaded === false
+              ? (Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES
+                ? `Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to load reads`
+                : "Click Load Reads for this locus")
               : "No visible reads after filtering.",
           }
         );
@@ -841,17 +867,13 @@ function toggleReadFilter(key) {
   });
 }
 
-function shouldFetchReads(trackUiState, state) {
-  const windowWidth = Math.max(state.end - state.start + 1, 1);
-  if (windowWidth > READ_AUTOLOAD_MAX_BASES) {
-    return false;
-  }
-  return trackUiState.trackOrder.some((path) => !trackUiState.collapsedTracks[path] && !trackUiState.coverageOnlyTracks[path]);
-}
-
 async function loadReadsForCurrentWindow() {
   const state = store.getState();
   if (!state.contig || !state.alignments || state.loadingReads) {
+    return;
+  }
+  if (state.alignments.readsLoaded) {
+    setStatus("Reads already loaded for this locus");
     return;
   }
   const windowWidth = Math.max(state.end - state.start + 1, 1);
@@ -882,7 +904,7 @@ async function loadReadsForCurrentWindow() {
   refreshToken = requestToken;
   activeReadsController = new AbortController();
   store.setState({ loadingReads: true });
-  setStatus("Loading reads");
+  setStatus("Loading reads", false, { progress: 0.82, loading: true });
 
   try {
     const readAlignments = await fetchAlignments(state.contig, state.start, state.end, {
@@ -942,10 +964,6 @@ function toggleTrackCollapse(trackPath) {
       ...nextCollapsed,
     },
   });
-
-  if (state.alignments?.readsLoaded === false && !nextCollapsed[trackPath] && !state.coverageOnlyTracks?.[trackPath]) {
-    loadReadsForCurrentWindow();
-  }
 }
 
 function toggleCoverageOnly(trackPath) {
@@ -959,10 +977,6 @@ function toggleCoverageOnly(trackPath) {
       ...nextCoverageOnly,
     },
   });
-
-  if (state.alignments?.readsLoaded === false && !nextCoverageOnly[trackPath] && !state.collapsedTracks?.[trackPath]) {
-    loadReadsForCurrentWindow();
-  }
 }
 
 function toggleAllCoverageOnly(tracks) {
@@ -979,10 +993,6 @@ function toggleAllCoverageOnly(tracks) {
   store.setState({
     coverageOnlyTracks: nextCoverageOnlyTracks,
   });
-
-  if (state.alignments?.readsLoaded === false && !nextValue) {
-    loadReadsForCurrentWindow();
-  }
 }
 
 function getContigMeta(contig, session) {
@@ -1142,9 +1152,86 @@ function buildSessionPayload() {
   };
 }
 
+function showConfirmModal({
+  title = "Confirm Action",
+  message = "",
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+}) {
+  return new Promise((resolve) => {
+    elements.confirmModalTitle.textContent = title;
+    elements.confirmModalMessage.textContent = message;
+    elements.confirmModalConfirm.textContent = confirmLabel;
+    elements.confirmModalCancel.textContent = cancelLabel;
+    elements.confirmModal.hidden = false;
+
+    const cleanup = () => {
+      elements.confirmModal.hidden = true;
+      elements.confirmModalConfirm.removeEventListener("click", handleConfirm);
+      elements.confirmModalCancel.removeEventListener("click", handleCancel);
+      elements.confirmModal.removeEventListener("click", handleOverlayCancel);
+      window.removeEventListener("keydown", handleEscape);
+    };
+
+    const handleConfirm = () => {
+      cleanup();
+      resolve(true);
+    };
+
+    const handleCancel = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    const handleOverlayCancel = (event) => {
+      if (event.target === elements.confirmModal) {
+        handleCancel();
+      }
+    };
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        handleCancel();
+      }
+    };
+
+    elements.confirmModalConfirm.addEventListener("click", handleConfirm);
+    elements.confirmModalCancel.addEventListener("click", handleCancel);
+    elements.confirmModal.addEventListener("click", handleOverlayCancel);
+    window.addEventListener("keydown", handleEscape);
+    elements.confirmModalConfirm.focus();
+  });
+}
+
+function isMissingIndexError(message) {
+  const text = String(message || "");
+  return text.includes("Missing FASTA index") || text.includes("Missing alignment index");
+}
+
+async function offerIndexCreationAndRetry(payload) {
+  const confirmed = await showConfirmModal({
+    title: "Create Missing Indexes",
+    message: "One or more required index files (.fai, .bai, or .crai) are missing. Create the missing indexes now?",
+    confirmLabel: "Create Indexes",
+    cancelLabel: "Cancel",
+  });
+  if (!confirmed) {
+    return false;
+  }
+
+  setStatus("Creating missing indexes", false, { progress: 0.25, loading: true });
+  const result = await createSessionIndexes(payload);
+  if (result.count > 0) {
+    setStatus(`Created ${result.count} index file${result.count === 1 ? "" : "s"}, retrying load`);
+  } else {
+    setStatus("Indexes already present, retrying load");
+  }
+  return true;
+}
+
 async function applySession(payload, message = "Loaded local files") {
   try {
-    setStatus("Loading local file session");
+    setStatus("Loading local file session", false, { progress: 0.15, loading: true });
     if (activeWindowController) {
       activeWindowController.abort();
       activeWindowController = null;
@@ -1158,6 +1245,7 @@ async function applySession(payload, message = "Loaded local files") {
     updateContigOptions(session);
     setSessionInputs(session);
     const firstContig = session.contigs[0];
+    const initialEnd = Math.min(firstContig.length, INITIAL_SESSION_WINDOW_BASES);
     sharedScrollLeft = 0;
     pendingCenterPosition = null;
     store.setState({
@@ -1165,7 +1253,7 @@ async function applySession(payload, message = "Loaded local files") {
       contig: firstContig.name,
       contigLength: firstContig.length,
       start: 1,
-      end: firstContig.length,
+      end: initialEnd,
       reference: null,
       alignments: null,
       variants: [],
@@ -1174,9 +1262,21 @@ async function applySession(payload, message = "Loaded local files") {
       selectedVariant: null,
       loadingReads: false,
     });
-    setStatus(message);
+    setStatus(message, false, { progress: 0.4, loading: true });
     await refreshWindow();
   } catch (error) {
+    if (isMissingIndexError(error.message)) {
+      try {
+        const shouldRetry = await offerIndexCreationAndRetry(payload);
+        if (shouldRetry) {
+          await applySession(payload, message);
+          return;
+        }
+      } catch (indexError) {
+        setStatus(indexError.message, true);
+        return;
+      }
+    }
     setStatus(error.message, true);
   }
 }
@@ -1396,6 +1496,7 @@ function attachEvents() {
 async function initialize() {
   try {
     attachEvents();
+    setStatus("Loading demo manifest", false, { progress: 0.08, loading: true });
     const manifest = await fetchManifest();
     if (!manifest.contigs || manifest.contigs.length === 0) {
       throw new Error("Reference FASTA with .fai index is required. Use the demo generator or load local files.");

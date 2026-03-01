@@ -58,3 +58,13 @@ export async function loadSession(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+export async function createSessionIndexes(payload) {
+  return request("/api/session/indexes", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}

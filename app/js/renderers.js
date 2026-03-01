@@ -320,7 +320,13 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     const barWidth = Math.max(pointWidthBases * scale - 1, 1);
     const counts = point.counts || null;
 
-    if (!counts || !point.position) {
+    const hasFractionalCounts = Boolean(
+      counts
+      && point.position
+      && ["A", "C", "G", "T", "N"].some((base) => (counts[base] || 0) > 0)
+    );
+
+    if (!hasFractionalCounts) {
       ctx.fillStyle = "#60c4e9";
       ctx.fillRect(x, y, barWidth, barHeight);
       return;

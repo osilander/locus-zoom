@@ -14,7 +14,12 @@
           <h1>Locus-Centric Genome, BAM, and Variant Viewer</h1>
         </div>
         <div class="status-block">
-          <span id="status-pill" class="status-pill">Loading demo manifest</span>
+          <span id="status-pill" class="status-pill">
+            <span id="status-pill-label">Loading demo manifest</span>
+            <span id="status-pill-progress" class="status-pill-progress">
+              <span id="status-pill-progress-bar" class="status-pill-progress-bar is-indeterminate"></span>
+            </span>
+          </span>
           <span id="window-label" class="window-label"></span>
         </div>
       </header>
@@ -139,6 +144,17 @@
           </section>
         </aside>
       </main>
+
+      <div id="confirm-modal" class="modal-overlay" hidden>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+          <h2 id="confirm-modal-title" class="modal-title">Confirm Action</h2>
+          <p id="confirm-modal-message" class="modal-copy"></p>
+          <div class="modal-actions">
+            <button id="confirm-modal-confirm">Confirm</button>
+            <button id="confirm-modal-cancel" class="secondary-button">Cancel</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script type="module" src="/js/app.js?v=20260301b"></script>
