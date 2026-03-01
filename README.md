@@ -6,9 +6,16 @@ Desktop-oriented genome viewer prototype with a web UI and a lightweight local P
 
 For a new user, the simplest path is:
 
+1. Clone the repository.
+2. Change into the project directory.
+3. Install the one Python dependency.
+4. Run the launcher.
+
 macOS / Linux:
 
 ```bash
+git clone https://github.com/osilander/locus-zoom.git
+cd locus-zoom
 python3 -m pip install -r requirements-production.txt
 python3 launch.py
 ```
@@ -16,6 +23,8 @@ python3 launch.py
 Windows:
 
 ```powershell
+git clone https://github.com/osilander/locus-zoom.git
+cd locus-zoom
 py -3 -m pip install -r requirements-production.txt
 py -3 launch.py
 ```
@@ -30,6 +39,15 @@ The launcher will:
 Then open:
 
 - [http://127.0.0.1:8765](http://127.0.0.1:8765)
+
+If `git` is not convenient, you can also download the repository ZIP from GitHub, extract it, open a terminal in the extracted folder, and then run the same install and launch commands.
+
+## Requirements
+
+- Python 3.10 or newer
+- `pysam` installed from `requirements-production.txt` (preferred)
+- or `samtools` installed on `PATH` as a fallback
+- a modern browser (Chrome, Edge, Safari, Firefox)
 
 This MVP covers three linked workflows:
 
@@ -47,6 +65,34 @@ The repository now also includes a first-pass Tauri shell scaffold in `src-tauri
 ## Run
 
 If you want to run the pieces manually instead of using `launch.py`:
+
+1. Clone the repository and change into it.
+2. Install the dependency.
+3. Generate demo data.
+4. Start the app.
+5. Open the local URL.
+
+macOS / Linux:
+
+```bash
+git clone https://github.com/osilander/locus-zoom.git
+cd locus-zoom
+python3 -m pip install -r requirements-production.txt
+python3 scripts/generate_demo_data.py
+python3 server.py
+```
+
+Windows:
+
+```powershell
+git clone https://github.com/osilander/locus-zoom.git
+cd locus-zoom
+py -3 -m pip install -r requirements-production.txt
+py -3 scripts\generate_demo_data.py
+py -3 server.py
+```
+
+Or, if you want the manual steps broken out:
 
 1. Generate demo data.
 
