@@ -1041,11 +1041,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
 
             self.send_error(404, "Unknown API endpoint")
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else "Command failed"
-            self.write_json({"error": stderr}, status=500)
+            try:
+                self.write_json({"error": stderr}, status=500)
+            except (BrokenPipeError, ConnectionResetError):
+                return
         except Exception as exc:
-            self.write_json({"error": str(exc)}, status=400)
+            try:
+                self.write_json({"error": str(exc)}, status=400)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     def read_json_body(self) -> Dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -1278,10 +1286,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         content_type = self.content_type_for(target.suffix)
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.end_headers()
-        self.wfile.write(target.read_bytes())
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(target.read_bytes())
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def content_type_for(self, suffix: str) -> str:
         return {
