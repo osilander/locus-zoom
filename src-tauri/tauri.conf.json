@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Genome Explorer",
+  "productName": "Locus Zoom",
   "version": "0.1.0",
   "identifier": "com.genomeexplorer.desktop",
   "build": {

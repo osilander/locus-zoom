@@ -990,7 +990,7 @@ SESSION = SessionConfig.from_manifest()
 
 
 class RequestHandler(BaseHTTPRequestHandler):
-    server_version = "GenomeExplorer/0.1"
+    server_version = "LocusZoom/0.1"
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1303,15 +1303,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         return
 
 
-class GenomeExplorerHTTPServer(ThreadingHTTPServer):
+class LocusZoomHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
 
 def main():
     available_backend()
-    with GenomeExplorerHTTPServer((HOST, PORT), RequestHandler) as httpd:
-        print(f"Genome Explorer running at http://{HOST}:{PORT} using {available_backend()} backend")
+    with LocusZoomHTTPServer((HOST, PORT), RequestHandler) as httpd:
+        print(f"Locus Zoom running at http://{HOST}:{PORT} using {available_backend()} backend")
         httpd.serve_forever()
 
 

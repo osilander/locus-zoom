@@ -104,7 +104,7 @@ fn main() {
                 .map_err(|error| format!("Invalid webview URL: {error}"))?;
 
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("Genome Explorer")
+                .title("Locus Zoom")
                 .inner_size(1600.0, 1024.0)
                 .build()
                 .map_err(|error| error.to_string())?;
@@ -123,5 +123,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Genome Explorer desktop");
+        .expect("error while running Locus Zoom desktop");
 }

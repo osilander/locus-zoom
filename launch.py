@@ -77,7 +77,7 @@ def check_runtime_backend():
 
 def main():
     os.chdir(ROOT)
-    print("Genome Explorer launcher")
+    print("Locus Zoom launcher")
     print(f"Expected URL: http://{DEFAULT_HOST}:{DEFAULT_PORT}")
     check_runtime_backend()
     ensure_demo_data()

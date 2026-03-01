@@ -1,4 +1,4 @@
-# Genome Explorer
+# Locus Zoom
 
 Desktop-oriented genome viewer prototype with a web UI and a lightweight local Python API.
 
