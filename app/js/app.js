@@ -1,0 +1,1197 @@
+import { fetchAlignments, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
+import { canResolveNativePaths, extractDroppedPaths, inferFileSlots } from "./desktop-bridge.js";
+import { renderAnnotations, renderCoverage, renderNavigator, renderReads, renderReference, renderSummary, renderVariantDetail, renderVariantList, renderVariants } from "./renderers.js";
+import { createStore, normalizeWindow, parseLocus } from "./state.js";
+
+const store = createStore({
+  session: null,
+  contig: "",
+  contigLength: 1,
+  start: 1,
+  end: 120,
+  reference: null,
+  alignments: null,
+  variants: [],
+  nearbyVariants: [],
+  annotations: [],
+  selectedVariant: null,
+  loadingReads: false,
+  readFilters: {
+    hideSecondary: false,
+    hideSupplementary: false,
+    hideLowMapq: false,
+  },
+  collapsedTracks: {},
+  coverageOnlyTracks: {},
+  trackOrder: [],
+});
+
+const elements = {
+  status: document.querySelector("#status-pill"),
+  windowLabel: document.querySelector("#window-label"),
+  contigSelect: document.querySelector("#contig-select"),
+  startInput: document.querySelector("#start-input"),
+  endInput: document.querySelector("#end-input"),
+  locusInput: document.querySelector("#locus-input"),
+  goButton: document.querySelector("#go-button"),
+  prevButton: document.querySelector("#prev-button"),
+  nextButton: document.querySelector("#next-button"),
+  prevVariantButton: document.querySelector("#prev-variant-button"),
+  nextVariantButton: document.querySelector("#next-variant-button"),
+  homeButton: document.querySelector("#home-button"),
+  zoomInButton: document.querySelector("#zoom-in-button"),
+  zoomOutButton: document.querySelector("#zoom-out-button"),
+  referenceTrack: document.querySelector("#reference-track"),
+  navigatorCanvas: document.querySelector("#navigator-canvas"),
+  alignmentTrackStack: document.querySelector("#alignment-track-stack"),
+  variantTrack: document.querySelector("#variant-track"),
+  variantCanvas: document.querySelector("#variant-canvas"),
+  annotationTrack: document.querySelector("#annotation-track"),
+  variantList: document.querySelector("#variant-list"),
+  variantDetail: document.querySelector("#variant-detail"),
+  summaryList: document.querySelector("#summary-list"),
+  sessionDetail: document.querySelector("#session-detail"),
+  dropZone: document.querySelector("#drop-zone"),
+  referencePathInput: document.querySelector("#reference-path-input"),
+  bamPathInput: document.querySelector("#bam-path-input"),
+  vcfPathInput: document.querySelector("#vcf-path-input"),
+  gffPathInput: document.querySelector("#gff-path-input"),
+  loadDataButton: document.querySelector("#load-data-button"),
+};
+
+let sharedScrollLeft = 0;
+let syncingScroll = false;
+let refreshToken = 0;
+let activeWindowController = null;
+let activeReadsController = null;
+let scheduledRefreshTimer = null;
+const REFERENCE_SEQUENCE_MAX_BASES = 5000;
+const COVERAGE_BIN_THRESHOLD = 5000;
+const COVERAGE_BIN_COUNT = 900;
+const READ_AUTOLOAD_MAX_BASES = 10000;
+const WINDOW_CACHE_LIMIT = 18;
+const REFRESH_DEBOUNCE_MS = 90;
+const windowCache = {
+  reference: new Map(),
+  coverage: new Map(),
+  variants: new Map(),
+  annotations: new Map(),
+  reads: new Map(),
+};
+
+function getHorizontalScrollers() {
+  return Array.from(document.querySelectorAll("[data-sync-scroll='x']"));
+}
+
+function minWindowBasesForZoom() {
+  return 12;
+}
+
+function setStatus(message, isError = false) {
+  elements.status.textContent = message;
+  elements.status.style.background = isError ? "rgba(181,71,45,0.14)" : "rgba(43,106,71,0.12)";
+  elements.status.style.color = isError ? "#8a2a16" : "#1e5336";
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function sessionCacheKey(session) {
+  if (!session) {
+    return "no-session";
+  }
+  return [
+    session.reference || "",
+    ...(session.bams || []),
+    session.vcf || "",
+    session.gff || "",
+  ].join("|");
+}
+
+function windowKey(state, extra = "") {
+  return [
+    sessionCacheKey(state.session),
+    state.contig,
+    state.start,
+    state.end,
+    extra,
+  ].join("::");
+}
+
+function getCached(cache, key) {
+  if (!cache.has(key)) {
+    return null;
+  }
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function setCached(cache, key, value) {
+  cache.set(key, value);
+  while (cache.size > WINDOW_CACHE_LIMIT) {
+    const firstKey = cache.keys().next().value;
+    cache.delete(firstKey);
+  }
+  return value;
+}
+
+function clearWindowCaches() {
+  Object.values(windowCache).forEach((cache) => cache.clear());
+}
+
+function scheduleRefresh(immediate = false) {
+  if (scheduledRefreshTimer) {
+    clearTimeout(scheduledRefreshTimer);
+    scheduledRefreshTimer = null;
+  }
+
+  if (immediate) {
+    refreshWindow();
+    return;
+  }
+
+  scheduledRefreshTimer = window.setTimeout(() => {
+    scheduledRefreshTimer = null;
+    refreshWindow();
+  }, REFRESH_DEBOUNCE_MS);
+}
+
+function setSessionInputs(session) {
+  elements.referencePathInput.value = session.reference || "";
+  elements.bamPathInput.value = (session.bams || (session.bam ? [session.bam] : [])).join("\n");
+  elements.vcfPathInput.value = session.vcf || "";
+  elements.gffPathInput.value = session.gff || "";
+}
+
+function updateContigOptions(session) {
+  elements.contigSelect.innerHTML = (session.contigs || [])
+    .map((contig) => `<option value="${contig.name}">${contig.name}</option>`)
+    .join("");
+}
+
+function syncControls(state) {
+  elements.contigSelect.value = state.contig;
+  elements.startInput.value = state.start;
+  elements.endInput.value = state.end;
+  elements.locusInput.value = state.contig ? `${state.contig}:${state.start}-${state.end}` : "";
+  elements.windowLabel.textContent = state.contig ? `${state.contig}:${state.start}-${state.end}` : "";
+}
+
+function renderSessionDetail(session) {
+  if (!session) {
+    elements.sessionDetail.textContent = "No active session.";
+    return;
+  }
+  const formatPath = (label, path) => `${label}: ${path || "not loaded"}`;
+  elements.sessionDetail.classList.remove("muted");
+  elements.sessionDetail.innerHTML = [
+    formatPath("Reference", session.reference),
+    formatPath(
+      "BAMs",
+      (session.bams || []).length ? (session.bams || []).join("<br />") : "not loaded"
+    ),
+    formatPath("VCF", session.vcf),
+    formatPath("GFF", session.gff),
+  ].join("<br />");
+}
+
+async function refreshWindow() {
+  const state = store.getState();
+  if (!state.contig) {
+    return;
+  }
+  if (activeWindowController) {
+    activeWindowController.abort();
+  }
+  if (activeReadsController) {
+    activeReadsController.abort();
+    activeReadsController = null;
+  }
+  activeWindowController = new AbortController();
+
+  const windowWidth = Math.max(state.end - state.start + 1, 1);
+  const coverageBins = windowWidth > COVERAGE_BIN_THRESHOLD ? COVERAGE_BIN_COUNT : 0;
+  const shouldFetchReferenceSequence = windowWidth <= REFERENCE_SEQUENCE_MAX_BASES;
+  const signal = activeWindowController.signal;
+
+  const requestToken = refreshToken + 1;
+  refreshToken = requestToken;
+
+  setStatus("Loading coverage");
+  try {
+    const referenceKey = windowKey(state, `ref:${shouldFetchReferenceSequence ? "seq" : "overview"}`);
+    const coverageKey = windowKey(state, `cov:${coverageBins}`);
+    const variantsKey = windowKey(state, "vars");
+    const annotationsKey = windowKey(state, "ann");
+
+    const cachedReference = getCached(windowCache.reference, referenceKey);
+    const cachedCoverage = getCached(windowCache.coverage, coverageKey);
+    const cachedVariants = getCached(windowCache.variants, variantsKey);
+    const cachedAnnotations = getCached(windowCache.annotations, annotationsKey);
+
+    const [reference, alignments, variantsPayload, annotationsPayload] = await Promise.all([
+      cachedReference || (
+        shouldFetchReferenceSequence
+          ? fetchReference(state.contig, state.start, state.end, { signal })
+          : Promise.resolve({
+              contig: state.contig,
+              start: state.start,
+              end: state.end,
+              sequence: "",
+            })
+      ),
+      cachedCoverage || fetchAlignments(state.contig, state.start, state.end, { includeReads: false, bins: coverageBins, signal }),
+      cachedVariants || fetchVariants(state.contig, state.start, state.end, { signal }),
+      cachedAnnotations || fetchAnnotations(state.contig, state.start, state.end, { signal }),
+    ]);
+
+    if (requestToken !== refreshToken) {
+      return;
+    }
+
+    setCached(windowCache.reference, referenceKey, reference);
+    setCached(windowCache.coverage, coverageKey, alignments);
+    setCached(windowCache.variants, variantsKey, variantsPayload);
+    setCached(windowCache.annotations, annotationsKey, annotationsPayload);
+
+    const selectedVariant = state.selectedVariant
+      ? variantsPayload.variants.find((variant) => variant.id === state.selectedVariant.id) || null
+      : null;
+
+    const trackUiState = deriveTrackUiState(alignments.tracks || [], state);
+
+    store.setState({
+      reference,
+      alignments,
+      variants: variantsPayload.variants,
+      nearbyVariants: variantsPayload.nearbyVariants || [],
+      annotations: annotationsPayload.annotations,
+      selectedVariant,
+      trackOrder: trackUiState.trackOrder,
+      collapsedTracks: trackUiState.collapsedTracks,
+      coverageOnlyTracks: trackUiState.coverageOnlyTracks,
+      loadingReads: shouldFetchReads(trackUiState, state),
+    });
+
+    if (!shouldFetchReads(trackUiState, state)) {
+      setStatus("Loaded locus");
+      return;
+    }
+
+    setStatus("Loaded coverage, loading reads");
+
+    const readsKey = windowKey(state, "reads");
+    const cachedReads = getCached(windowCache.reads, readsKey);
+    if (cachedReads) {
+      store.setState({
+        alignments: cachedReads,
+        loadingReads: false,
+      });
+      setStatus(
+        cachedReads.truncated
+          ? "Loaded locus (read list truncated for display)"
+          : "Loaded locus"
+      );
+      return;
+    }
+
+    activeReadsController = new AbortController();
+    const readAlignments = await fetchAlignments(state.contig, state.start, state.end, {
+      includeReads: true,
+      signal: activeReadsController.signal,
+    });
+    if (requestToken !== refreshToken) {
+      return;
+    }
+    activeReadsController = null;
+    setCached(windowCache.reads, readsKey, readAlignments);
+
+    store.setState({
+      alignments: readAlignments,
+      loadingReads: false,
+    });
+
+    setStatus(
+      readAlignments.truncated
+        ? "Loaded locus (read list truncated for display)"
+        : "Loaded locus"
+    );
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    setStatus(error.message, true);
+  }
+}
+
+function render(state) {
+  syncControls(state);
+  renderSessionDetail(state.session);
+
+  if (!state.reference || !state.alignments) {
+    renderPendingTracks(state);
+    return;
+  }
+
+  renderNavigator(elements.navigatorCanvas, {
+    contigLength: state.contigLength,
+    start: state.start,
+    end: state.end,
+    variants: [...state.variants, ...state.nearbyVariants],
+    selectedVariant: state.selectedVariant,
+  }, handleNavigatorJump);
+  renderReference(elements.referenceTrack, state.reference, state.selectedVariant);
+  renderAlignmentTracks(state);
+  renderVariants(
+    elements.variantCanvas,
+    state.variants,
+    { start: state.start, end: state.end },
+    state.selectedVariant,
+    handleVariantPick
+  );
+  renderAnnotations(
+    elements.annotationTrack,
+    state.annotations,
+    { start: state.start, end: state.end },
+    handleAnnotationPick
+  );
+  renderVariantList(elements.variantList, state.variants, state.nearbyVariants, state.selectedVariant, handleVariantPick);
+  renderVariantDetail(elements.variantDetail, state.selectedVariant);
+
+  const alignmentTracks = state.alignments.tracks || [];
+  const depths = alignmentTracks.flatMap((track) => (track.coverage || []).map((point) => point.depth));
+  const totalReadCount = state.alignments.totalReadCount || alignmentTracks.reduce((sum, track) => sum + (track.totalReadCount || 0), 0);
+  renderSummary(elements.summaryList, {
+    contig: state.contig,
+    start: state.start,
+    end: state.end,
+    readCount: state.alignments.readsLoaded ? totalReadCount : "coverage only",
+    variantCount: state.variants.length,
+    annotationCount: state.annotations.length,
+    maxDepth: depths.length ? Math.max(...depths) : 0,
+  });
+
+  applySharedScroll();
+}
+
+function renderPendingTracks(state) {
+  elements.referenceTrack.textContent = state.contig ? "Loading reference..." : "No reference sequence loaded.";
+  elements.alignmentTrackStack.innerHTML = `
+    <div class="track-card">
+      <div class="track-header">
+        <span>Alignments</span>
+        <span class="track-meta">${state.contig ? "Loading reads" : "No BAM tracks loaded"}</span>
+      </div>
+      <div class="track-body muted">${state.contig ? "Loading alignments for the selected locus..." : "Load one or more BAM / CRAM files to inspect read evidence."}</div>
+    </div>
+  `;
+  elements.variantList.textContent = state.reference ? "" : "Loading variants...";
+  elements.annotationTrack.textContent = state.reference ? "" : "Loading annotations...";
+}
+
+function renderAlignmentTracks(state) {
+  elements.alignmentTrackStack.innerHTML = "";
+
+  const tracks = orderAlignmentTracks(state.alignments?.tracks || [], state.trackOrder);
+  if (!tracks.length) {
+    const card = document.createElement("div");
+    card.className = "track-card";
+    card.innerHTML = `
+      <div class="track-header">
+        <span>Alignments</span>
+        <span class="track-meta">No BAM tracks loaded</span>
+      </div>
+      <div class="track-body muted">Load one or more BAM / CRAM files to inspect read evidence.</div>
+    `;
+    elements.alignmentTrackStack.appendChild(card);
+    return;
+  }
+
+  const bulkCard = document.createElement("div");
+  bulkCard.className = "track-card";
+  bulkCard.innerHTML = `
+    <div class="track-header">
+      <span>Alignment Track Controls</span>
+      <div class="track-header-controls">
+        <span class="track-meta">${tracks.length} BAM tracks loaded</span>
+      </div>
+    </div>
+  `;
+  const bulkControls = bulkCard.querySelector(".track-header-controls");
+  const bulkToggle = document.createElement("button");
+  bulkToggle.type = "button";
+  bulkToggle.className = "track-inline-button";
+  bulkToggle.textContent = allTracksCoverageOnly(tracks, state) ? "Show All Reads" : "Coverage Only All";
+  bulkToggle.addEventListener("click", () => toggleAllCoverageOnly(tracks));
+  const filterSecondaryButton = document.createElement("button");
+  filterSecondaryButton.type = "button";
+  filterSecondaryButton.className = "track-inline-button";
+  filterSecondaryButton.textContent = state.readFilters.hideSecondary ? "Show Secondary" : "Hide Secondary";
+  filterSecondaryButton.addEventListener("click", () => toggleReadFilter("hideSecondary"));
+  const filterSupplementaryButton = document.createElement("button");
+  filterSupplementaryButton.type = "button";
+  filterSupplementaryButton.className = "track-inline-button";
+  filterSupplementaryButton.textContent = state.readFilters.hideSupplementary ? "Show Supplementary" : "Hide Supplementary";
+  filterSupplementaryButton.addEventListener("click", () => toggleReadFilter("hideSupplementary"));
+  const filterMapqButton = document.createElement("button");
+  filterMapqButton.type = "button";
+  filterMapqButton.className = "track-inline-button";
+  filterMapqButton.textContent = state.readFilters.hideLowMapq ? "Show Low MQ" : "Hide Low MQ";
+  filterMapqButton.addEventListener("click", () => toggleReadFilter("hideLowMapq"));
+  bulkControls.appendChild(bulkToggle);
+  bulkControls.appendChild(filterSecondaryButton);
+  bulkControls.appendChild(filterSupplementaryButton);
+  bulkControls.appendChild(filterMapqButton);
+  elements.alignmentTrackStack.appendChild(bulkCard);
+
+  tracks.forEach((track, index) => {
+    const card = document.createElement("div");
+    card.className = "track-card";
+
+    const header = document.createElement("div");
+    header.className = "track-header";
+
+    const title = document.createElement("span");
+    title.textContent = `Alignments ${index + 1}: ${track.id}`;
+
+    const meta = document.createElement("span");
+    meta.className = "track-meta";
+    meta.textContent = state.loadingReads
+      ? "Coverage loaded, reads loading"
+      : state.alignments.readsLoaded === false
+        ? `Coverage only (${Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES ? "zoom in to load reads" : "reads not loaded"})`
+        : track.truncated
+        ? `${track.reads.length} reads shown of ${track.totalReadCount}`
+        : `${track.totalReadCount} reads shown`;
+
+    const controls = document.createElement("div");
+    controls.className = "track-header-controls";
+
+    const collapseButton = document.createElement("button");
+    collapseButton.type = "button";
+    collapseButton.className = "track-inline-button";
+    collapseButton.textContent = state.collapsedTracks?.[track.path] ? "Expand" : "Collapse";
+    collapseButton.addEventListener("click", () => toggleTrackCollapse(track.path));
+
+    const readsButton = document.createElement("button");
+    readsButton.type = "button";
+    readsButton.className = "track-inline-button";
+    readsButton.textContent = state.coverageOnlyTracks?.[track.path] ? "Show Reads" : "Coverage Only";
+    readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]);
+    readsButton.addEventListener("click", () => toggleCoverageOnly(track.path));
+
+    const upButton = document.createElement("button");
+    upButton.type = "button";
+    upButton.className = "track-inline-button";
+    upButton.textContent = "Up";
+    upButton.disabled = index === 0;
+    upButton.addEventListener("click", () => moveTrack(track.path, -1));
+
+    const downButton = document.createElement("button");
+    downButton.type = "button";
+    downButton.className = "track-inline-button";
+    downButton.textContent = "Down";
+    downButton.disabled = index === tracks.length - 1;
+    downButton.addEventListener("click", () => moveTrack(track.path, 1));
+
+    controls.appendChild(meta);
+    controls.appendChild(collapseButton);
+    controls.appendChild(readsButton);
+    controls.appendChild(upButton);
+    controls.appendChild(downButton);
+
+    header.appendChild(title);
+    header.appendChild(controls);
+
+    const coverageBody = document.createElement("div");
+    coverageBody.className = "track-body horizontal-track";
+    coverageBody.dataset.syncScroll = "x";
+    const coverageCanvas = document.createElement("canvas");
+    coverageCanvas.className = "track-canvas";
+    coverageCanvas.width = 1100;
+    coverageCanvas.height = 140;
+    coverageBody.appendChild(coverageCanvas);
+
+    const readsBody = document.createElement("div");
+    readsBody.className = "track-body reads-track";
+    readsBody.dataset.syncScroll = "x";
+
+    card.appendChild(header);
+    const isCollapsed = Boolean(state.collapsedTracks?.[track.path]);
+    const isCoverageOnly = Boolean(state.coverageOnlyTracks?.[track.path]);
+
+    if (!isCollapsed) {
+      card.appendChild(coverageBody);
+      if (!isCoverageOnly && !state.loadingReads) {
+        card.appendChild(readsBody);
+      }
+    }
+    elements.alignmentTrackStack.appendChild(card);
+
+    if (!isCollapsed) {
+      renderCoverage(
+        coverageCanvas,
+        track.coverage,
+        state.variants,
+        state.selectedVariant,
+        { contig: state.contig, start: state.start, end: state.end },
+        handleVariantPick
+      );
+      if (!isCoverageOnly && !state.loadingReads) {
+        const visibleReads = filterReads(track.reads, state.readFilters);
+        renderReads(
+          readsBody,
+          visibleReads,
+          state.reference,
+          state.selectedVariant,
+          {
+            emptyMessage: state.alignments.readsLoaded === false
+              ? `Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to view reads`
+              : "No visible reads after filtering.",
+          }
+        );
+      }
+    }
+  });
+
+  attachHorizontalSync();
+}
+
+function allTracksCoverageOnly(tracks, state) {
+  return tracks.length > 0 && tracks.every((track) => state.coverageOnlyTracks?.[track.path]);
+}
+
+function orderAlignmentTracks(tracks, trackOrder) {
+  if (!tracks.length) {
+    return tracks;
+  }
+
+  const orderIndex = new Map(trackOrder.map((path, index) => [path, index]));
+  return [...tracks].sort((left, right) => {
+    const leftIndex = orderIndex.has(left.path) ? orderIndex.get(left.path) : Number.MAX_SAFE_INTEGER;
+    const rightIndex = orderIndex.has(right.path) ? orderIndex.get(right.path) : Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+    return left.path.localeCompare(right.path);
+  });
+}
+
+function deriveTrackUiState(tracks, state) {
+  const currentPaths = tracks.map((track) => track.path);
+  const currentSet = new Set(currentPaths);
+  return {
+    trackOrder: [
+    ...state.trackOrder.filter((path) => currentSet.has(path)),
+    ...currentPaths.filter((path) => !state.trackOrder.includes(path)),
+    ],
+    collapsedTracks: Object.fromEntries(
+    Object.entries(state.collapsedTracks || {}).filter(([path]) => currentSet.has(path))
+    ),
+    coverageOnlyTracks: Object.fromEntries(
+    Object.entries(state.coverageOnlyTracks || {}).filter(([path]) => currentSet.has(path))
+    ),
+  };
+}
+
+function filterReads(reads, filters) {
+  return (reads || []).filter((read) => {
+    if (filters.hideSecondary && read.secondary) {
+      return false;
+    }
+    if (filters.hideSupplementary && read.supplementary) {
+      return false;
+    }
+    if (filters.hideLowMapq && read.mapq < 20) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function toggleReadFilter(key) {
+  const state = store.getState();
+  store.setState({
+    readFilters: {
+      ...state.readFilters,
+      [key]: !state.readFilters[key],
+    },
+  });
+}
+
+function shouldFetchReads(trackUiState, state) {
+  const windowWidth = Math.max(state.end - state.start + 1, 1);
+  if (windowWidth > READ_AUTOLOAD_MAX_BASES) {
+    return false;
+  }
+  return trackUiState.trackOrder.some((path) => !trackUiState.collapsedTracks[path] && !trackUiState.coverageOnlyTracks[path]);
+}
+
+async function loadReadsForCurrentWindow() {
+  const state = store.getState();
+  if (!state.contig || !state.alignments || state.loadingReads) {
+    return;
+  }
+  const windowWidth = Math.max(state.end - state.start + 1, 1);
+  if (windowWidth > READ_AUTOLOAD_MAX_BASES) {
+    setStatus(`Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to load reads`);
+    return;
+  }
+
+  const readsKey = windowKey(state, "reads");
+  const cachedReads = getCached(windowCache.reads, readsKey);
+  if (cachedReads) {
+    store.setState({
+      alignments: cachedReads,
+      loadingReads: false,
+    });
+    setStatus(
+      cachedReads.truncated
+        ? "Loaded reads (read list truncated for display)"
+        : "Loaded reads"
+    );
+    return;
+  }
+  if (activeReadsController) {
+    activeReadsController.abort();
+  }
+
+  const requestToken = refreshToken + 1;
+  refreshToken = requestToken;
+  activeReadsController = new AbortController();
+  store.setState({ loadingReads: true });
+  setStatus("Loading reads");
+
+  try {
+    const readAlignments = await fetchAlignments(state.contig, state.start, state.end, {
+      includeReads: true,
+      signal: activeReadsController.signal,
+    });
+    if (requestToken !== refreshToken) {
+      return;
+    }
+    activeReadsController = null;
+    setCached(windowCache.reads, readsKey, readAlignments);
+    store.setState({
+      alignments: readAlignments,
+      loadingReads: false,
+    });
+    setStatus(
+      readAlignments.truncated
+        ? "Loaded reads (read list truncated for display)"
+        : "Loaded reads"
+    );
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+    if (requestToken === refreshToken) {
+      activeReadsController = null;
+      store.setState({ loadingReads: false });
+      setStatus(error.message, true);
+    }
+  }
+}
+
+function moveTrack(trackPath, direction) {
+  const state = store.getState();
+  const nextOrder = [...state.trackOrder];
+  const index = nextOrder.indexOf(trackPath);
+  if (index < 0) {
+    return;
+  }
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= nextOrder.length) {
+    return;
+  }
+  const [moved] = nextOrder.splice(index, 1);
+  nextOrder.splice(targetIndex, 0, moved);
+  store.setState({ trackOrder: nextOrder });
+}
+
+function toggleTrackCollapse(trackPath) {
+  const state = store.getState();
+  const nextCollapsed = {
+    ...state.collapsedTracks,
+    [trackPath]: !state.collapsedTracks?.[trackPath],
+  };
+  store.setState({
+    collapsedTracks: {
+      ...nextCollapsed,
+    },
+  });
+
+  if (state.alignments?.readsLoaded === false && !nextCollapsed[trackPath] && !state.coverageOnlyTracks?.[trackPath]) {
+    loadReadsForCurrentWindow();
+  }
+}
+
+function toggleCoverageOnly(trackPath) {
+  const state = store.getState();
+  const nextCoverageOnly = {
+    ...state.coverageOnlyTracks,
+    [trackPath]: !state.coverageOnlyTracks?.[trackPath],
+  };
+  store.setState({
+    coverageOnlyTracks: {
+      ...nextCoverageOnly,
+    },
+  });
+
+  if (state.alignments?.readsLoaded === false && !nextCoverageOnly[trackPath] && !state.collapsedTracks?.[trackPath]) {
+    loadReadsForCurrentWindow();
+  }
+}
+
+function toggleAllCoverageOnly(tracks) {
+  const state = store.getState();
+  const nextValue = !allTracksCoverageOnly(tracks, state);
+  const nextCoverageOnlyTracks = { ...state.coverageOnlyTracks };
+
+  tracks.forEach((track) => {
+    if (!state.collapsedTracks?.[track.path]) {
+      nextCoverageOnlyTracks[track.path] = nextValue;
+    }
+  });
+
+  store.setState({
+    coverageOnlyTracks: nextCoverageOnlyTracks,
+  });
+
+  if (state.alignments?.readsLoaded === false && !nextValue) {
+    loadReadsForCurrentWindow();
+  }
+}
+
+function getContigMeta(contig, session) {
+  return (session?.contigs || []).find((item) => item.name === contig) || null;
+}
+
+function zoomAroundVisibleViewport(factor) {
+  const state = store.getState();
+  const currentWidth = Math.max(state.end - state.start + 1, 1);
+  const minWidth = minWindowBasesForZoom();
+  const targetWidth = Math.max(minWidth, Math.min(state.contigLength, Math.round(currentWidth * factor)));
+  if (targetWidth === currentWidth) {
+    if (factor < 1) {
+      setStatus(`Max zoom reached (${minWidth} bases visible)`);
+    } else {
+      setStatus("Already at full contig view");
+    }
+    return;
+  }
+  const center = Math.round((state.start + state.end) / 2);
+  const nextStart = center - Math.floor(targetWidth / 2);
+  const nextEnd = nextStart + targetWidth - 1;
+  updateWindow({ start: nextStart, end: nextEnd });
+}
+
+function shiftWindow(direction) {
+  const state = store.getState();
+  const width = Math.max(state.end - state.start + 1, 1);
+  const delta = Math.max(1, Math.round(width * 0.8)) * direction;
+  updateWindow({
+    start: state.start + delta,
+    end: state.end + delta,
+  });
+}
+
+function updateWindow(nextWindow, nextContig = null) {
+  const state = store.getState();
+  const contig = nextContig || state.contig;
+  const contigMeta = getContigMeta(contig, state.session);
+  if (!contigMeta) {
+    setStatus("Unknown contig", true);
+    return;
+  }
+
+  const normalized = normalizeWindow(contigMeta.length, nextWindow.start, nextWindow.end);
+  sharedScrollLeft = 0;
+  store.setState({
+    contig,
+    contigLength: contigMeta.length,
+    start: normalized.start,
+    end: normalized.end,
+    reference: null,
+    alignments: null,
+    variants: [],
+    nearbyVariants: [],
+    annotations: [],
+    selectedVariant: null,
+    loadingReads: false,
+  });
+  scheduleRefresh();
+}
+
+function handleVariantPick(variant) {
+  const state = store.getState();
+  const width = Math.max(24, Math.min(80, state.end - state.start + 1));
+  const start = variant.position - Math.floor(width / 2);
+  const end = start + width - 1;
+  const normalized = normalizeWindow(state.contigLength, start, end);
+  sharedScrollLeft = 0;
+  store.setState({
+    selectedVariant: variant,
+    start: normalized.start,
+    end: normalized.end,
+    reference: null,
+    alignments: null,
+    variants: [],
+    nearbyVariants: [],
+    annotations: [],
+    loadingReads: false,
+  });
+  scheduleRefresh(true);
+}
+
+function handleAnnotationPick(feature) {
+  const padding = Math.max(20, Math.round((feature.end - feature.start + 1) * 0.2));
+  updateWindow({
+    start: feature.start - padding,
+    end: feature.end + padding,
+  });
+}
+
+function handleNavigatorJump(position) {
+  const state = store.getState();
+  const width = Math.max(state.end - state.start + 1, 1);
+  const start = position - Math.floor(width / 2);
+  const end = start + width - 1;
+  updateWindow({ start, end });
+}
+
+function getKnownVariants(state) {
+  const merged = [...(state.variants || []), ...(state.nearbyVariants || [])];
+  const byId = new Map();
+  merged.forEach((variant) => {
+    if (variant?.id) {
+      byId.set(variant.id, variant);
+    }
+  });
+  return [...byId.values()].sort((left, right) => left.position - right.position);
+}
+
+function stepToVariant(direction) {
+  const state = store.getState();
+  const variants = getKnownVariants(state);
+  if (!variants.length) {
+    setStatus("No nearby variants available", true);
+    return;
+  }
+
+  const anchor = state.selectedVariant?.position ?? Math.round((state.start + state.end) / 2);
+  let candidate = null;
+
+  if (direction < 0) {
+    for (let index = variants.length - 1; index >= 0; index -= 1) {
+      if (variants[index].position < anchor) {
+        candidate = variants[index];
+        break;
+      }
+    }
+  } else {
+    for (let index = 0; index < variants.length; index += 1) {
+      if (variants[index].position > anchor) {
+        candidate = variants[index];
+        break;
+      }
+    }
+  }
+
+  if (!candidate) {
+    setStatus(direction < 0 ? "No previous known variant" : "No next known variant");
+    return;
+  }
+
+  handleVariantPick(candidate);
+}
+
+function buildSessionPayload() {
+  return {
+    reference: elements.referencePathInput.value,
+    bam: elements.bamPathInput.value,
+    vcf: elements.vcfPathInput.value,
+    gff: elements.gffPathInput.value,
+  };
+}
+
+async function applySession(payload, message = "Loaded local files") {
+  try {
+    setStatus("Loading local file session");
+    if (activeWindowController) {
+      activeWindowController.abort();
+      activeWindowController = null;
+    }
+    if (activeReadsController) {
+      activeReadsController.abort();
+      activeReadsController = null;
+    }
+    clearWindowCaches();
+    const session = await loadSession(payload);
+    updateContigOptions(session);
+    setSessionInputs(session);
+    const firstContig = session.contigs[0];
+    sharedScrollLeft = 0;
+    store.setState({
+      session,
+      contig: firstContig.name,
+      contigLength: firstContig.length,
+      start: 1,
+      end: firstContig.length,
+      reference: null,
+      alignments: null,
+      variants: [],
+      nearbyVariants: [],
+      annotations: [],
+      selectedVariant: null,
+      loadingReads: false,
+    });
+    setStatus(message);
+    await refreshWindow();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function maxSharedScrollLeft() {
+  const anchor = getHorizontalScrollers()[0];
+  const contentWidth = anchor?.scrollWidth || 0;
+  const viewportWidth = anchor?.clientWidth || 0;
+  return Math.max(0, contentWidth - viewportWidth);
+}
+
+function applySharedScroll(source = null) {
+  const clamped = Math.max(0, Math.min(sharedScrollLeft, maxSharedScrollLeft()));
+  sharedScrollLeft = clamped;
+  syncingScroll = true;
+  getHorizontalScrollers().forEach((scroller) => {
+    if (scroller === source) {
+      return;
+    }
+    scroller.scrollLeft = clamped;
+  });
+  if (source) {
+    source.scrollLeft = clamped;
+  }
+  syncingScroll = false;
+}
+
+function attachHorizontalSync() {
+  getHorizontalScrollers().forEach((scroller) => {
+    if (scroller.dataset.syncBound === "true") {
+      return;
+    }
+    scroller.addEventListener("scroll", () => {
+      if (syncingScroll) {
+        return;
+      }
+      sharedScrollLeft = scroller.scrollLeft;
+      applySharedScroll(scroller);
+    });
+    scroller.dataset.syncBound = "true";
+  });
+}
+
+function populateDroppedPaths(paths) {
+  const inferred = inferFileSlots(paths);
+  if (inferred.reference) {
+    elements.referencePathInput.value = inferred.reference;
+  }
+  if (inferred.bams?.length) {
+    elements.bamPathInput.value = inferred.bams.join("\n");
+  }
+  if (inferred.vcf) {
+    elements.vcfPathInput.value = inferred.vcf;
+  }
+  if (inferred.gff) {
+    elements.gffPathInput.value = inferred.gff;
+  }
+}
+
+function attachDropZone() {
+  const activate = (event) => {
+    event.preventDefault();
+    elements.dropZone.classList.add("dragover");
+  };
+
+  const deactivate = (event) => {
+    event.preventDefault();
+    elements.dropZone.classList.remove("dragover");
+  };
+
+  elements.dropZone.addEventListener("dragenter", activate);
+  elements.dropZone.addEventListener("dragover", activate);
+  elements.dropZone.addEventListener("dragleave", deactivate);
+  elements.dropZone.addEventListener("drop", async (event) => {
+    deactivate(event);
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    if (!canResolveNativePaths(files)) {
+      setStatus("This browser cannot read dropped native paths. In the desktop shell, drop will populate them directly.", true);
+      return;
+    }
+
+    const paths = extractDroppedPaths(files);
+    populateDroppedPaths(paths);
+    await applySession(
+      buildSessionPayload(),
+      "Loaded dropped local files"
+    );
+  });
+}
+
+function isTypingTarget(target) {
+  if (!target) {
+    return false;
+  }
+  const tagName = target.tagName;
+  return tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT" || target.isContentEditable;
+}
+
+function attachKeyboardShortcuts() {
+  window.addEventListener("keydown", (event) => {
+    if (isTypingTarget(event.target)) {
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      elements.goButton.click();
+      return;
+    }
+
+    if (event.key === "h" || event.key === "H") {
+      event.preventDefault();
+      elements.homeButton.click();
+      return;
+    }
+
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      elements.zoomInButton.click();
+      return;
+    }
+
+    if (event.key === "-") {
+      event.preventDefault();
+      elements.zoomOutButton.click();
+      return;
+    }
+
+    if (event.key === "[") {
+      event.preventDefault();
+      elements.prevVariantButton.click();
+      return;
+    }
+
+    if (event.key === "]") {
+      event.preventDefault();
+      elements.nextVariantButton.click();
+      return;
+    }
+
+    if (event.shiftKey && event.key === "ArrowLeft") {
+      event.preventDefault();
+      elements.prevButton.click();
+      return;
+    }
+
+    if (event.shiftKey && event.key === "ArrowRight") {
+      event.preventDefault();
+      elements.nextButton.click();
+    }
+  });
+}
+
+function attachEvents() {
+  elements.goButton.addEventListener("click", () => {
+    try {
+      const parsed = parseLocus(elements.locusInput.value);
+      updateWindow({ start: parsed.start, end: parsed.end }, parsed.contig);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+
+  elements.loadDataButton.addEventListener("click", async () => {
+    await applySession(buildSessionPayload());
+  });
+
+  elements.contigSelect.addEventListener("change", () => {
+    const contig = elements.contigSelect.value;
+    const contigMeta = getContigMeta(contig, store.getState().session);
+    if (!contigMeta) {
+      setStatus("Unknown contig", true);
+      return;
+    }
+    updateWindow({ start: 1, end: contigMeta.length }, contig);
+  });
+
+  elements.homeButton.addEventListener("click", () => {
+    const state = store.getState();
+    updateWindow({ start: 1, end: state.contigLength });
+  });
+
+  elements.prevButton.addEventListener("click", () => {
+    shiftWindow(-1);
+  });
+
+  elements.nextButton.addEventListener("click", () => {
+    shiftWindow(1);
+  });
+
+  elements.prevVariantButton.addEventListener("click", () => {
+    stepToVariant(-1);
+  });
+
+  elements.nextVariantButton.addEventListener("click", () => {
+    stepToVariant(1);
+  });
+
+  elements.zoomInButton.addEventListener("click", () => {
+    zoomAroundVisibleViewport(0.75);
+  });
+
+  elements.zoomOutButton.addEventListener("click", () => {
+    zoomAroundVisibleViewport(4 / 3);
+  });
+
+  attachDropZone();
+  attachKeyboardShortcuts();
+  attachHorizontalSync();
+  window.addEventListener("resize", () => applySharedScroll());
+}
+
+async function initialize() {
+  attachEvents();
+  try {
+    const session = await fetchManifest();
+    if (!session.contigs || session.contigs.length === 0) {
+      throw new Error("Reference FASTA with .fai index is required. Use the demo generator or load local files.");
+    }
+
+    updateContigOptions(session);
+    setSessionInputs(session);
+    const firstContig = session.contigs[0];
+    store.setState({
+      session,
+      contig: firstContig.name,
+      contigLength: firstContig.length,
+      start: 1,
+      end: firstContig.length,
+    });
+
+    await refreshWindow();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+store.subscribe(render);
+initialize();

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Genome Explorer",
+  "version": "0.1.0",
+  "identifier": "com.genomeexplorer.desktop",
+  "build": {
+    "frontendDist": "../app"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg",
+      "msi"
+    ],
+    "resources": [
+      "../server.py",
+      "../app",
+      "../data"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "digestAlgorithm": "sha256"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "reference": "demo.fa",
+  "bam": "demo.bam",
+  "bams": [
+    "demo.bam",
+    "demo_compare.bam",
+    "demo_third.bam"
+  ],
+  "vcf": "demo.vcf",
+  "gff": "demo.gff3",
+  "contigs": [
+    {
+      "name": "chrDemo",
+      "length": 50000
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+##fileformat=VCFv4.2
+##contig=<ID=chrDemo,length=50000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE
+chrDemo	82	demo_var_1	G	A	87	PASS	DP=17	GT:AD	0/1:8,6
+chrDemo	141	demo_var_2	A	G	94	PASS	DP=20	GT:AD	0/1:8,6
+chrDemo	213	demo_var_3	A	G	101	PASS	DP=23	GT:AD	0/1:8,6
+chrDemo	15004	demo_var_4	T	C	108	PASS	DP=26	GT:AD	0/1:8,6
+chrDemo	32010	demo_var_5	G	A	115	PASS	DP=29	GT:AD	0/1:8,6
+chrDemo	47220	demo_var_6	C	T	122	PASS	DP=32	GT:AD	0/1:8,6

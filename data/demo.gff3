@@ -1,0 +1,19 @@
+##gff-version 3
+chrDemo	demo	gene	40	170	.	+	.	ID=geneA;Name=DemoGeneA
+chrDemo	demo	exon	40	90	.	+	.	ID=geneA_exon1;Parent=geneA;Name=DemoGeneA exon 1
+chrDemo	demo	exon	120	170	.	+	.	ID=geneA_exon2;Parent=geneA;Name=DemoGeneA exon 2
+chrDemo	demo	gene	200	310	.	-	.	ID=geneB;Name=DemoGeneB
+chrDemo	demo	exon	200	235	.	-	.	ID=geneB_exon1;Parent=geneB;Name=DemoGeneB exon 1
+chrDemo	demo	exon	260	310	.	-	.	ID=geneB_exon2;Parent=geneB;Name=DemoGeneB exon 2
+chrDemo	demo	gene	380	540	.	+	.	ID=geneC;Name=DemoGeneC
+chrDemo	demo	exon	380	430	.	+	.	ID=geneC_exon1;Parent=geneC;Name=DemoGeneC exon 1
+chrDemo	demo	exon	470	540	.	+	.	ID=geneC_exon2;Parent=geneC;Name=DemoGeneC exon 2
+chrDemo	demo	gene	14920	15120	.	+	.	ID=geneD;Name=DemoGeneD
+chrDemo	demo	exon	14920	15010	.	+	.	ID=geneD_exon1;Parent=geneD;Name=DemoGeneD exon 1
+chrDemo	demo	exon	15060	15120	.	+	.	ID=geneD_exon2;Parent=geneD;Name=DemoGeneD exon 2
+chrDemo	demo	gene	31940	32170	.	-	.	ID=geneE;Name=DemoGeneE
+chrDemo	demo	exon	31940	32020	.	-	.	ID=geneE_exon1;Parent=geneE;Name=DemoGeneE exon 1
+chrDemo	demo	exon	32080	32170	.	-	.	ID=geneE_exon2;Parent=geneE;Name=DemoGeneE exon 2
+chrDemo	demo	gene	46900	47280	.	+	.	ID=geneF;Name=DemoGeneF
+chrDemo	demo	exon	46900	47040	.	+	.	ID=geneF_exon1;Parent=geneF;Name=DemoGeneF exon 1
+chrDemo	demo	exon	47130	47280	.	+	.	ID=geneF_exon2;Parent=geneF;Name=DemoGeneF exon 2
