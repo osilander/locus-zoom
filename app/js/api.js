@@ -25,7 +25,7 @@ async function request(path, options = {}) {
 }
 
 export async function fetchManifest() {
-  return request("/api/session");
+  return request("/api/manifest");
 }
 
 export async function fetchReference(contig, start, end, options = {}) {

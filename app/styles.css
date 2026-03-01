@@ -279,6 +279,16 @@ button:hover {
   font-size: 0.78rem;
 }
 
+.track-inline-select {
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
 .track-inline-button:disabled {
   opacity: 0.45;
   cursor: default;
@@ -388,6 +398,15 @@ button:hover {
   width: max-content;
 }
 
+.read-group-header {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 10px;
+}
+
 .read-overview-row {
   position: relative;
   height: 9px;
@@ -440,7 +459,7 @@ button:hover {
 
 .base-strip,
 .read-strip {
-  min-height: 22px;
+  min-height: 30px;
 }
 
 .ruler-cell {
@@ -491,8 +510,10 @@ button:hover {
 }
 
 .base.mismatch {
-  color: #fff8f3;
-  background: var(--signal);
+  font-weight: 800;
+  box-shadow:
+    inset 0 0 0 2px rgba(36, 48, 70, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.35);
 }
 
 .base.reverse {
@@ -535,6 +556,52 @@ button:hover {
 
 .base.selected-site {
   box-shadow: 0 0 0 2px rgba(122, 16, 40, 0.45);
+}
+
+.read-direction-indicator {
+  position: absolute;
+  top: 0;
+  width: 16px;
+  height: 8px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #2f89c6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.read-direction-indicator.reverse {
+  color: #c18f2f;
+}
+
+.read-variant-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(24, 28, 36, 0.7);
+  pointer-events: none;
+}
+
+.read-variant-marker.selected {
+  background: rgba(122, 16, 40, 0.9);
+}
+
+.read-overview-variant-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(24, 28, 36, 0.7);
+  pointer-events: none;
+}
+
+.read-overview-variant-marker.selected {
+  background: rgba(122, 16, 40, 0.9);
 }
 
 .sidebar-card {

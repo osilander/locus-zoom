@@ -274,8 +274,9 @@ export function renderReference(target, referenceWindow, selectedVariant) {
   target.appendChild(canvas);
 }
 
-export function renderCoverage(canvas, coverage, variants, selectedVariant, windowState, onPick) {
+export function renderCoverage(canvas, coverage, variants, selectedVariant, windowState, onPick, options = {}) {
   const ctx = canvas.getContext("2d");
+  const { logScale = false } = options;
   const baseCount = Math.max(windowState.end - windowState.start + 1, 1);
   const detailed = isDetailedMode(baseCount);
   const width = renderWidthFor(baseCount, containerWidthFor(canvas.parentElement));
@@ -295,15 +296,47 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     return;
   }
 
+  const metric = (depth) => {
+    if (!logScale) {
+      return depth;
+    }
+    return Math.log10(depth + 1);
+  };
   const maxDepth = Math.max(...coverage.map((point) => point.depth), 1);
+  const maxMetric = Math.max(...coverage.map((point) => metric(point.depth)), 1);
+  const baseColors = {
+    A: "#90d6ff",
+    C: "#a8c4ff",
+    G: "#ffd699",
+    T: "#ffbfde",
+    N: "#cdd6e8",
+  };
 
   coverage.forEach((point) => {
-    const barHeight = (point.depth / maxDepth) * (height - 30);
+    const barHeight = (metric(point.depth) / maxMetric) * (height - 30);
     const x = ((point.start ?? point.position) - windowState.start) * scale;
     const pointWidthBases = (point.end ?? point.position) - (point.start ?? point.position) + 1;
     const y = height - barHeight - 18;
-    ctx.fillStyle = "#60c4e9";
-    ctx.fillRect(x, y, Math.max(pointWidthBases * scale - 1, 1), barHeight);
+    const barWidth = Math.max(pointWidthBases * scale - 1, 1);
+    const counts = point.counts || null;
+
+    if (!counts || !point.position) {
+      ctx.fillStyle = "#60c4e9";
+      ctx.fillRect(x, y, barWidth, barHeight);
+      return;
+    }
+
+    let currentY = y + barHeight;
+    ["A", "C", "G", "T", "N"].forEach((base) => {
+      const fraction = point.depth > 0 ? (counts[base] || 0) / point.depth : 0;
+      if (fraction <= 0) {
+        return;
+      }
+      const segmentHeight = Math.max(barHeight * fraction, 1);
+      currentY -= segmentHeight;
+      ctx.fillStyle = baseColors[base];
+      ctx.fillRect(x, currentY, barWidth, segmentHeight);
+    });
   });
 
   if (selectedVariant) {
@@ -312,7 +345,7 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
 
   ctx.fillStyle = "#5f675e";
   ctx.font = "12px sans-serif";
-  ctx.fillText(`Max depth ${maxDepth}`, 14, height - 4);
+  ctx.fillText(`${logScale ? "Log" : "Linear"} max depth ${maxDepth}`, 14, height - 4);
 
   if (baseCount > COVERAGE_TOOLTIP_MAX_BASES) {
     canvas.onmousemove = () => hideCoverageTooltip();
@@ -323,6 +356,7 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
 
   const variantByPosition = new Map((variants || []).map((variant) => [variant.position, variant]));
   const depthByPosition = new Map((coverage || []).map((point) => [point.position, point.depth]));
+  const countsByPosition = new Map((coverage || []).map((point) => [point.position, point.counts || null]));
   canvas.onmousemove = (event) => {
     const rect = canvas.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * width;
@@ -333,7 +367,16 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     }
     const hoveredDepth = depthByPosition.get(hoveredPosition) ?? 0;
     const hoveredVariant = variantByPosition.get(hoveredPosition);
+    const hoveredCounts = countsByPosition.get(hoveredPosition) || null;
     let content = `<strong>${windowState.contig || ""}${windowState.contig ? ":" : ""}${hoveredPosition}</strong><br />Depth: ${hoveredDepth}`;
+    if (hoveredCounts && hoveredDepth > 0) {
+      const parts = ["A", "C", "G", "T", "N"]
+        .filter((base) => (hoveredCounts[base] || 0) > 0)
+        .map((base) => `${base}:${hoveredCounts[base]}`);
+      if (parts.length) {
+        content += `<br />Bases: ${parts.join(" ")}`;
+      }
+    }
     if (hoveredVariant) {
       content += `
         <br /><br />
@@ -402,9 +445,26 @@ export function renderVariants(canvas, variants, windowState, selectedVariant, o
   };
 }
 
-export function renderReads(target, reads, referenceWindow, selectedVariant, options = {}) {
+function firstVisibleReadPosition(read, referenceWindow) {
+  const visible = (read.layout || []).find(
+    (entry) => entry.position >= referenceWindow.start && entry.position <= referenceWindow.end
+  );
+  if (visible) {
+    return visible.position;
+  }
+  if (read.start >= referenceWindow.start && read.start <= referenceWindow.end) {
+    return read.start;
+  }
+  if (read.end >= referenceWindow.start && read.end <= referenceWindow.end) {
+    return referenceWindow.start;
+  }
+  return null;
+}
+
+export function renderReads(target, readGroups, referenceWindow, variants, selectedVariant, options = {}) {
   target.innerHTML = "";
-  if (!reads || reads.length === 0) {
+  const groups = (readGroups || []).filter((group) => (group.reads || []).length > 0);
+  if (!groups.length) {
     target.textContent = options.emptyMessage || "No reads overlap this locus.";
     return;
   }
@@ -413,78 +473,113 @@ export function renderReads(target, reads, referenceWindow, selectedVariant, opt
   const detailed = windowWidth <= READ_DETAIL_MAX_BASES;
   const width = renderWidthFor(windowWidth, containerWidthFor(target));
   const scale = width / windowWidth;
-  const lanes = packReadsIntoLanes(reads);
+  const cursorPosition = options.cursorPosition ?? null;
+  const visibleVariants = (variants || []).filter(
+    (variant) => variant.position >= referenceWindow.start && variant.position <= referenceWindow.end
+  );
 
-  lanes.forEach((laneReads) => {
-    const row = document.createElement("div");
-    row.className = "read-row";
-
-    if (detailed) {
-      const segment = buildStrip(windowWidth);
-      segment.classList.add("read-strip");
-      segment.title = `${laneReads.length} packed reads`;
-
-      laneReads.forEach((read) => {
-        (read.layout || []).forEach((entry) => {
-          const absolutePosition = entry.position;
-          if (absolutePosition < referenceWindow.start || absolutePosition > referenceWindow.end) {
-            return;
-          }
-          const localIndex = absolutePosition - referenceWindow.start;
-          const refBase = referenceWindow.sequence[localIndex];
-          const isReferenceBase = Boolean(entry.base) && !["N", "I"].includes(entry.op);
-          const mismatch = isReferenceBase && entry.op !== "D"
-            ? Boolean(refBase) && refBase.toUpperCase() !== entry.base.toUpperCase()
-            : false;
-          const baseEl = buildBaseCell(entry.base || (entry.op === "D" ? "-" : ""), absolutePosition, {
-            selectedVariant,
-            mismatch,
-            reverse: read.reverse,
-            deleted: entry.op === "D",
-            skipped: entry.op === "N",
-            inserted: entry.op === "I",
-            secondary: read.secondary,
-            supplementary: read.supplementary,
-            lowMapq: read.mapq < 20,
-          });
-          baseEl.style.left = `${localIndex * BASE_CELL_WIDTH}px`;
-          if (entry.op === "I") {
-            baseEl.title = `${read.name} ${absolutePosition} +${entry.base} MQ:${read.mapq}`;
-          } else {
-            baseEl.title = `${read.name} ${absolutePosition} ${entry.op} MQ:${read.mapq}`;
-          }
-          segment.appendChild(baseEl);
-        });
-      });
-
-      row.appendChild(segment);
-    } else {
-      row.classList.add("read-overview-row");
-      row.style.width = `${width}px`;
-      row.title = `${laneReads.length} packed reads`;
-
-      laneReads.forEach((read) => {
-        const bar = document.createElement("div");
-        bar.className = `read-overview-bar${read.reverse ? " reverse" : ""}${read.secondary ? " secondary" : ""}${read.supplementary ? " supplementary" : ""}${read.mapq < 20 ? " low-mapq" : ""}`;
-        const clippedStart = Math.max(read.start, referenceWindow.start);
-        const clippedEnd = Math.min(read.end, referenceWindow.end);
-        const left = (clippedStart - referenceWindow.start) * scale;
-        const barWidth = Math.max((clippedEnd - clippedStart + 1) * scale, 1.5);
-        bar.style.left = `${left}px`;
-        bar.style.width = `${barWidth}px`;
-        bar.title = `${read.name}  MQ:${read.mapq}  ${read.start}-${read.end}`;
-        row.appendChild(bar);
-      });
-
-      if (selectedVariant) {
-        const guide = document.createElement("div");
-        guide.className = "read-guide-line";
-        guide.style.left = `${baseCenterX(selectedVariant.position, referenceWindow.start, scale)}px`;
-        row.appendChild(guide);
-      }
+  groups.forEach((group) => {
+    if (group.label) {
+      const groupHeader = document.createElement("div");
+      groupHeader.className = "read-group-header";
+      groupHeader.textContent = group.label;
+      target.appendChild(groupHeader);
     }
 
-    target.appendChild(row);
+    const lanes = packReadsIntoLanes(group.reads || []);
+
+    lanes.forEach((laneReads) => {
+      const row = document.createElement("div");
+      row.className = "read-row";
+
+      if (detailed) {
+        const segment = buildStrip(windowWidth);
+        segment.classList.add("read-strip");
+        segment.title = `${laneReads.length} packed reads`;
+
+        laneReads.forEach((read) => {
+          const directionPosition = firstVisibleReadPosition(read, referenceWindow);
+          if (directionPosition !== null) {
+            const directionMarker = document.createElement("span");
+            directionMarker.className = `read-direction-indicator${read.reverse ? " reverse" : ""}`;
+            directionMarker.style.left = `${(directionPosition - referenceWindow.start) * BASE_CELL_WIDTH}px`;
+            directionMarker.textContent = read.reverse ? "<" : ">";
+            directionMarker.title = `${read.name} ${read.reverse ? "reverse" : "forward"} strand`;
+            segment.appendChild(directionMarker);
+          }
+
+          (read.layout || []).forEach((entry) => {
+            const absolutePosition = entry.position;
+            if (absolutePosition < referenceWindow.start || absolutePosition > referenceWindow.end) {
+              return;
+            }
+            const localIndex = absolutePosition - referenceWindow.start;
+            const refBase = referenceWindow.sequence[localIndex];
+            const isReferenceBase = Boolean(entry.base) && !["N", "I"].includes(entry.op);
+            const mismatch = isReferenceBase && entry.op !== "D"
+              ? Boolean(refBase) && refBase.toUpperCase() !== entry.base.toUpperCase()
+              : false;
+            const baseEl = buildBaseCell(entry.base || (entry.op === "D" ? "-" : ""), absolutePosition, {
+              selectedVariant,
+              mismatch,
+              reverse: read.reverse,
+              deleted: entry.op === "D",
+              skipped: entry.op === "N",
+              inserted: entry.op === "I",
+              secondary: read.secondary,
+              supplementary: read.supplementary,
+              lowMapq: read.mapq < 20,
+            });
+            baseEl.style.left = `${localIndex * BASE_CELL_WIDTH}px`;
+            baseEl.style.top = "8px";
+            const strandLabel = read.reverse ? "reverse" : "forward";
+            const cursorNote = cursorPosition && absolutePosition === cursorPosition ? " at sort site" : "";
+            if (entry.op === "I") {
+              baseEl.title = `${read.name} ${absolutePosition} +${entry.base} MQ:${read.mapq} ${strandLabel}${cursorNote}`;
+            } else {
+              baseEl.title = `${read.name} ${absolutePosition} ${entry.op} MQ:${read.mapq} ${strandLabel}${cursorNote}`;
+            }
+            segment.appendChild(baseEl);
+          });
+        });
+
+        row.appendChild(segment);
+      } else {
+        row.classList.add("read-overview-row");
+        row.style.width = `${width}px`;
+        row.title = `${laneReads.length} packed reads`;
+
+        laneReads.forEach((read) => {
+          const bar = document.createElement("div");
+          bar.className = `read-overview-bar${read.reverse ? " reverse" : ""}${read.secondary ? " secondary" : ""}${read.supplementary ? " supplementary" : ""}${read.mapq < 20 ? " low-mapq" : ""}`;
+          const clippedStart = Math.max(read.start, referenceWindow.start);
+          const clippedEnd = Math.min(read.end, referenceWindow.end);
+          const left = (clippedStart - referenceWindow.start) * scale;
+          const barWidth = Math.max((clippedEnd - clippedStart + 1) * scale, 1.5);
+          bar.style.left = `${left}px`;
+          bar.style.width = `${barWidth}px`;
+          bar.title = `${read.name}  MQ:${read.mapq}  ${read.start}-${read.end}  ${read.reverse ? "reverse" : "forward"} strand`;
+          row.appendChild(bar);
+        });
+
+        if (selectedVariant) {
+          const guide = document.createElement("div");
+          guide.className = "read-guide-line";
+          guide.style.left = `${baseCenterX(selectedVariant.position, referenceWindow.start, scale)}px`;
+          row.appendChild(guide);
+        }
+
+        visibleVariants.forEach((variant) => {
+          const marker = document.createElement("div");
+          marker.className = `read-overview-variant-marker${selectedVariant && selectedVariant.id === variant.id ? " selected" : ""}`;
+          marker.style.left = `${baseCenterX(variant.position, referenceWindow.start, scale)}px`;
+          marker.title = `${variant.id} ${variant.ref}→${variant.alt}`;
+          row.appendChild(marker);
+        });
+      }
+
+      target.appendChild(row);
+    });
   });
 }
 
@@ -560,22 +655,24 @@ export function renderVariantDetail(target, variant) {
   target.classList.remove("muted");
   const quality = variant.qual === null ? "NA" : variant.qual;
   const effects = variant.effects || [];
+  let effectRowsMarkup = "";
+  effects.slice(0, 3).forEach((effect) => {
+    const summary = effect.summary || {};
+    effectRowsMarkup += `
+      <div class="variant-effect-row">
+        <span><strong>${summary.consequence || "NA"}</strong></span>
+        <span>${summary.gene || "NA"}</span>
+        <span>${summary.impact || "NA"}</span>
+        <span>${summary.proteinChange || summary.codingChange || "NA"}</span>
+      </div>
+    `;
+  });
   const effectMarkup = effects.length
     ? `
       <div class="variant-detail-section">
         <strong>${variant.effectSource || "Effect"} annotations</strong>
         <div class="variant-effect-list">
-          ${effects.slice(0, 3).map((effect) => {
-            const summary = effect.summary || {};
-            return `
-              <div class="variant-effect-row">
-                <span><strong>${summary.consequence || "NA"}</strong></span>
-                <span>${summary.gene || "NA"}</span>
-                <span>${summary.impact || "NA"}</span>
-                <span>${summary.proteinChange || summary.codingChange || "NA"}</span>
-              </div>
-            `;
-          }).join("")}
+          ${effectRowsMarkup}
           ${effects.length > 3 ? `<div class="variant-effect-more">+${effects.length - 3} more annotations</div>` : ""}
         </div>
       </div>

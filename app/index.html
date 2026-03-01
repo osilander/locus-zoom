@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Locus Zoom</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260301b" />
   </head>
   <body>
     <div class="app-shell">
@@ -27,19 +27,19 @@
         <div class="path-grid">
           <div class="control-group">
             <label for="reference-path-input">Reference FASTA</label>
-            <input id="reference-path-input" type="text" placeholder="/path/to/reference.fa" />
+            <input id="reference-path-input" type="text" placeholder="/path/to/reference.fa" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.fa" />
           </div>
           <div class="control-group">
             <label for="bam-path-input">BAM / CRAM Files</label>
-            <textarea id="bam-path-input" rows="3" placeholder="/path/to/sample-a.bam&#10;/path/to/sample-b.bam"></textarea>
+            <textarea id="bam-path-input" rows="3" placeholder="/path/to/sample-a.bam&#10;/path/to/sample-b.bam">/Users/osilande/Documents/New project/genome-explorer/data/demo.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_compare.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_third.bam</textarea>
           </div>
           <div class="control-group">
             <label for="vcf-path-input">VCF</label>
-            <input id="vcf-path-input" type="text" placeholder="/path/to/sample.vcf" />
+            <input id="vcf-path-input" type="text" placeholder="/path/to/sample.vcf" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.vcf" />
           </div>
           <div class="control-group">
             <label for="gff-path-input">GFF / GFF3</label>
-            <input id="gff-path-input" type="text" placeholder="/path/to/annotations.gff3" />
+            <input id="gff-path-input" type="text" placeholder="/path/to/annotations.gff3" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.gff3" />
           </div>
           <div class="button-row">
             <button id="load-data-button">Load Local Files</button>
@@ -141,6 +141,6 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js"></script>
+    <script type="module" src="/js/app.js?v=20260301b"></script>
   </body>
 </html>

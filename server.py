@@ -579,6 +579,23 @@ def build_read_layout(cigar: str, start: int, sequence: str) -> tuple:
     return layout, max(start, reference_position) - 1
 
 
+def parse_optional_sam_tags(tag_fields: List[str]) -> Dict[str, object]:
+    tags: Dict[str, object] = {}
+    for field in tag_fields:
+        parts = field.split(":", 2)
+        if len(parts) != 3:
+            continue
+        key, value_type, value = parts
+        if value_type == "i":
+            try:
+                tags[key] = int(value)
+                continue
+            except ValueError:
+                pass
+        tags[key] = value
+    return tags
+
+
 def parse_sam_line(line: str) -> Dict:
     fields = line.rstrip("\n").split("\t")
     if len(fields) < 11:
@@ -590,9 +607,12 @@ def parse_sam_line(line: str) -> Dict:
     pos = int(fields[3])
     mapq = int(fields[4])
     cigar = fields[5]
+    insert_size = int(fields[8])
     seq = fields[9]
     qual = fields[10]
+    tags = parse_optional_sam_tags(fields[11:])
     layout, end = build_read_layout(cigar, pos, seq)
+    read_group = tags.get("RG")
 
     return {
         "name": qname,
@@ -602,16 +622,21 @@ def parse_sam_line(line: str) -> Dict:
         "end": end,
         "mapq": mapq,
         "cigar": cigar,
+        "insertSize": insert_size,
         "sequence": seq,
         "quality": qual,
         "layout": layout,
+        "tags": tags,
+        "readGroup": read_group,
+        "haplotype": tags.get("HP"),
+        "sample": tags.get("SM") or tags.get("LB") or (f"RG:{read_group}" if read_group else None),
         "reverse": bool(flag & 16),
         "secondary": bool(flag & 256),
         "supplementary": bool(flag & 2048),
     }
 
 
-def parse_aligned_segment(segment) -> Dict:
+def parse_aligned_segment(segment, rg_samples: Optional[Dict[str, str]] = None) -> Dict:
     sequence = segment.query_sequence or ""
     quality = (
         "".join(chr(score + 33) for score in segment.query_qualities)
@@ -620,7 +645,9 @@ def parse_aligned_segment(segment) -> Dict:
     )
     start = int(segment.reference_start) + 1
     cigar = segment.cigarstring or "*"
+    tags = {key: value for key, value in segment.get_tags()}
     layout, end = build_read_layout(cigar, start, sequence)
+    read_group = tags.get("RG")
     return {
         "name": segment.query_name or "(unnamed)",
         "flag": int(segment.flag),
@@ -629,9 +656,14 @@ def parse_aligned_segment(segment) -> Dict:
         "end": end,
         "mapq": int(segment.mapping_quality),
         "cigar": cigar,
+        "insertSize": int(segment.template_length),
         "sequence": sequence,
         "quality": quality,
         "layout": layout,
+        "tags": tags,
+        "readGroup": read_group,
+        "haplotype": tags.get("HP"),
+        "sample": tags.get("SM") or (rg_samples or {}).get(read_group) or tags.get("LB") or (f"RG:{read_group}" if read_group else None),
         "reverse": bool(segment.is_reverse),
         "secondary": bool(segment.is_secondary),
         "supplementary": bool(segment.is_supplementary),
@@ -641,8 +673,12 @@ def parse_aligned_segment(segment) -> Dict:
 def read_alignment_records(path: Path, contig: str, start: int, end: int) -> List[Dict]:
     if available_backend() == "pysam":
         with pysam.AlignmentFile(str(path), "rb") as handle:
+            rg_samples = {}
+            for record in handle.header.to_dict().get("RG", []):
+                if isinstance(record, dict) and record.get("ID") and record.get("SM"):
+                    rg_samples[str(record["ID"])] = str(record["SM"])
             return [
-                parse_aligned_segment(segment)
+                parse_aligned_segment(segment, rg_samples)
                 for segment in handle.fetch(contig, max(start - 1, 0), end)
             ]
     region = f"{contig}:{start}-{end}"
@@ -650,9 +686,20 @@ def read_alignment_records(path: Path, contig: str, start: int, end: int) -> Lis
     return [parse_sam_line(line) for line in output.splitlines() if line.strip()]
 
 
+def empty_base_counts() -> Dict[str, int]:
+    return {
+        "A": 0,
+        "C": 0,
+        "G": 0,
+        "T": 0,
+        "N": 0,
+    }
+
+
 def compute_coverage(reads: List[Dict], start: int, end: int) -> List[Dict]:
     width = max(end - start + 1, 0)
     counts = [0] * width
+    base_counts = [empty_base_counts() for _ in range(width)]
     for read in reads:
         for base in read.get("layout", []):
             if not base["covers"]:
@@ -660,9 +707,18 @@ def compute_coverage(reads: List[Dict], start: int, end: int) -> List[Dict]:
             position = base["position"]
             if position < start or position > end:
                 continue
-            counts[position - start] += 1
+            index = position - start
+            counts[index] += 1
+            normalized_base = (base.get("base") or "N").upper()
+            if normalized_base not in base_counts[index]:
+                normalized_base = "N"
+            base_counts[index][normalized_base] += 1
     return [
-        {"position": start + idx, "depth": depth}
+        {
+            "position": start + idx,
+            "depth": depth,
+            "counts": base_counts[idx],
+        }
         for idx, depth in enumerate(counts)
     ]
 
@@ -673,23 +729,22 @@ def read_depth_coverage(path: Path, contig: str, start: int, end: int) -> List[D
             counts = handle.count_coverage(contig, max(start - 1, 0), end)
         depths = [sum(base_counts) for base_counts in zip(*counts)] if counts else []
         return [
-            {"position": position, "depth": (depths[position - start] if position - start < len(depths) else 0)}
+            {
+                "position": position,
+                "depth": (depths[position - start] if position - start < len(depths) else 0),
+                "counts": {
+                    "A": counts[0][position - start] if counts and position - start < len(counts[0]) else 0,
+                    "C": counts[1][position - start] if counts and position - start < len(counts[1]) else 0,
+                    "G": counts[2][position - start] if counts and position - start < len(counts[2]) else 0,
+                    "T": counts[3][position - start] if counts and position - start < len(counts[3]) else 0,
+                    "N": 0,
+                },
+            }
             for position in range(start, end + 1)
         ]
-    region = f"{contig}:{start}-{end}"
-    output = run_samtools(["depth", "-a", "-r", region, str(path)])
-    depth_by_position = {}
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        if len(fields) < 3:
-            continue
-        depth_by_position[int(fields[1])] = int(fields[2])
-    return [
-        {"position": position, "depth": depth_by_position.get(position, 0)}
-        for position in range(start, end + 1)
-    ]
+    # For the external samtools backend, reuse parsed reads so exact coverage can
+    # include per-base composition for the coverage renderer.
+    return compute_coverage(read_alignment_records(path, contig, start, end), start, end)
 
 
 def parse_sam_span(line: str) -> Dict:
@@ -986,6 +1041,7 @@ class SessionConfig:
         return build_validated_snapshot(self)
 
 
+DEFAULT_SESSION = SessionConfig.from_manifest()
 SESSION = SessionConfig.from_manifest()
 
 
@@ -1008,7 +1064,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def handle_api(self, parsed, method: str = "GET"):
         try:
-            if parsed.path in ("/api/manifest", "/api/session") and method == "GET":
+            if parsed.path == "/api/manifest" and method == "GET":
+                self.write_json(DEFAULT_SESSION.snapshot())
+                return
+
+            if parsed.path == "/api/session" and method == "GET":
                 self.write_json(SESSION.snapshot())
                 return
 
@@ -1289,6 +1349,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            if target.suffix in {".html", ".css", ".js"}:
+                self.send_header("Cache-Control", "no-store, max-age=0")
             self.end_headers()
             self.wfile.write(target.read_bytes())
         except (BrokenPipeError, ConnectionResetError):

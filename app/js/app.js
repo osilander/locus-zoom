@@ -16,6 +16,9 @@ const store = createStore({
   annotations: [],
   selectedVariant: null,
   loadingReads: false,
+  alignmentSort: "base",
+  alignmentGroup: "none",
+  coverageLogScale: false,
   readFilters: {
     hideSecondary: false,
     hideSupplementary: false,
@@ -65,6 +68,7 @@ let refreshToken = 0;
 let activeWindowController = null;
 let activeReadsController = null;
 let scheduledRefreshTimer = null;
+let pendingCenterPosition = null;
 const REFERENCE_SEQUENCE_MAX_BASES = 5000;
 const COVERAGE_BIN_THRESHOLD = 5000;
 const COVERAGE_BIN_COUNT = 900;
@@ -85,6 +89,55 @@ function getHorizontalScrollers() {
 
 function minWindowBasesForZoom() {
   return 12;
+}
+
+function currentViewportMetrics(state = store.getState()) {
+  const anchor = getHorizontalScrollers()[0];
+  const scrollWidth = anchor?.scrollWidth || 0;
+  const clientWidth = anchor?.clientWidth || 0;
+  const windowWidth = Math.max(state.end - state.start + 1, 1);
+  const normalizedCenter = scrollWidth > 0
+    ? Math.max(0, Math.min(1, (sharedScrollLeft + clientWidth / 2) / scrollWidth))
+    : 0.5;
+  const centerBase = Math.max(
+    state.start,
+    Math.min(
+      state.end,
+      state.start + Math.round(normalizedCenter * Math.max(windowWidth - 1, 0))
+    )
+  );
+  return {
+    centerBase,
+    clientWidth,
+    scrollWidth,
+  };
+}
+
+function applyPendingViewportCenter(state = store.getState()) {
+  if (pendingCenterPosition == null) {
+    return;
+  }
+  const anchor = getHorizontalScrollers()[0];
+  if (!anchor) {
+    return;
+  }
+  const baseCount = Math.max(state.end - state.start + 1, 1);
+  const scrollWidth = anchor.scrollWidth || 0;
+  const clientWidth = anchor.clientWidth || 0;
+  if (scrollWidth <= clientWidth) {
+    pendingCenterPosition = null;
+    sharedScrollLeft = 0;
+    applySharedScroll();
+    return;
+  }
+
+  const relative = Math.max(
+    0,
+    Math.min(1, ((pendingCenterPosition - state.start) + 0.5) / baseCount)
+  );
+  pendingCenterPosition = null;
+  sharedScrollLeft = Math.max(0, Math.min(scrollWidth - clientWidth, relative * scrollWidth - clientWidth / 2));
+  applySharedScroll();
 }
 
 function setStatus(message, isError = false) {
@@ -375,6 +428,7 @@ function render(state) {
   });
 
   applySharedScroll();
+  applyPendingViewportCenter(state);
 }
 
 function renderPendingTracks(state) {
@@ -441,7 +495,35 @@ function renderAlignmentTracks(state) {
   filterMapqButton.className = "track-inline-button";
   filterMapqButton.textContent = state.readFilters.hideLowMapq ? "Show Low MQ" : "Hide Low MQ";
   filterMapqButton.addEventListener("click", () => toggleReadFilter("hideLowMapq"));
+  const sortSelect = document.createElement("select");
+  sortSelect.className = "track-inline-select";
+  sortSelect.innerHTML = `
+    <option value="base">Sort: Base at site</option>
+    <option value="insertSize">Sort: Insert size</option>
+    <option value="strand">Sort: Strand</option>
+  `;
+  sortSelect.value = state.alignmentSort;
+  sortSelect.addEventListener("change", (event) => setAlignmentSort(event.target.value));
+  const groupSelect = document.createElement("select");
+  groupSelect.className = "track-inline-select";
+  groupSelect.innerHTML = `
+    <option value="none">Group: None</option>
+    <option value="strand">Group: Strand</option>
+    <option value="sample">Group: Sample</option>
+    <option value="readGroup">Group: Read group</option>
+    <option value="haplotype">Group: Haplotype tag (HP)</option>
+  `;
+  groupSelect.value = state.alignmentGroup;
+  groupSelect.addEventListener("change", (event) => setAlignmentGroup(event.target.value));
+  const coverageScaleButton = document.createElement("button");
+  coverageScaleButton.type = "button";
+  coverageScaleButton.className = "track-inline-button";
+  coverageScaleButton.textContent = state.coverageLogScale ? "Coverage: Log" : "Coverage: Linear";
+  coverageScaleButton.addEventListener("click", toggleCoverageScale);
   bulkControls.appendChild(bulkToggle);
+  bulkControls.appendChild(sortSelect);
+  bulkControls.appendChild(groupSelect);
+  bulkControls.appendChild(coverageScaleButton);
   bulkControls.appendChild(filterSecondaryButton);
   bulkControls.appendChild(filterSupplementaryButton);
   bulkControls.appendChild(filterMapqButton);
@@ -538,16 +620,22 @@ function renderAlignmentTracks(state) {
         state.variants,
         state.selectedVariant,
         { contig: state.contig, start: state.start, end: state.end },
-        handleVariantPick
+        handleVariantPick,
+        {
+          logScale: state.coverageLogScale,
+        }
       );
       if (!isCoverageOnly && !state.loadingReads) {
         const visibleReads = filterReads(track.reads, state.readFilters);
+        const sortedGroupedReads = organizeReadsForDisplay(visibleReads, state);
         renderReads(
           readsBody,
-          visibleReads,
+          sortedGroupedReads,
           state.reference,
+          state.variants,
           state.selectedVariant,
           {
+            cursorPosition: sortCursorPosition(state),
             emptyMessage: state.alignments.readsLoaded === false
               ? `Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to view reads`
               : "No visible reads after filtering.",
@@ -610,6 +698,137 @@ function filterReads(reads, filters) {
     }
     return true;
   });
+}
+
+function setAlignmentSort(value) {
+  store.setState({ alignmentSort: value });
+}
+
+function setAlignmentGroup(value) {
+  store.setState({ alignmentGroup: value });
+}
+
+function toggleCoverageScale() {
+  const state = store.getState();
+  store.setState({
+    coverageLogScale: !state.coverageLogScale,
+  });
+}
+
+function sortCursorPosition(state) {
+  return state.selectedVariant?.position ?? Math.round((state.start + state.end) / 2);
+}
+
+function readEntryAtPosition(read, position) {
+  return (read.layout || []).find((entry) => entry.position === position) || null;
+}
+
+function baseSortRank(read, position) {
+  const entry = readEntryAtPosition(read, position);
+  if (!entry) {
+    return 99;
+  }
+  if (entry.op === "D") {
+    return 6;
+  }
+  if (entry.op === "I") {
+    return 5;
+  }
+  const base = (entry.base || "").toUpperCase();
+  return {
+    A: 0,
+    C: 1,
+    G: 2,
+    T: 3,
+    N: 4,
+  }[base] ?? 7;
+}
+
+function compareReads(left, right, state) {
+  if (state.alignmentSort === "insertSize") {
+    const delta = Math.abs(right.insertSize || 0) - Math.abs(left.insertSize || 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  } else if (state.alignmentSort === "strand") {
+    const delta = Number(left.reverse) - Number(right.reverse);
+    if (delta !== 0) {
+      return delta;
+    }
+  } else {
+    const cursor = sortCursorPosition(state);
+    const delta = baseSortRank(left, cursor) - baseSortRank(right, cursor);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  if (left.start !== right.start) {
+    return left.start - right.start;
+  }
+  return (left.name || "").localeCompare(right.name || "");
+}
+
+function groupLabel(read, groupMode) {
+  if (groupMode === "strand") {
+    return read.reverse ? "Reverse strand" : "Forward strand";
+  }
+  if (groupMode === "sample") {
+    return read.sample || "Unassigned sample";
+  }
+  if (groupMode === "readGroup") {
+    return read.readGroup ? `RG: ${read.readGroup}` : "No read group";
+  }
+  if (groupMode === "haplotype") {
+    return read.haplotype != null ? `HP: ${read.haplotype}` : "No HP tag";
+  }
+  return "Alignments";
+}
+
+function compareGroupLabels(left, right, groupMode) {
+  if (groupMode === "strand") {
+    const rank = {
+      "Forward strand": 0,
+      "Reverse strand": 1,
+    };
+    return (rank[left] ?? 99) - (rank[right] ?? 99);
+  }
+  if (groupMode === "haplotype") {
+    const leftMatch = left.match(/^HP: (\d+)/);
+    const rightMatch = right.match(/^HP: (\d+)/);
+    if (leftMatch && rightMatch) {
+      return Number(leftMatch[1]) - Number(rightMatch[1]);
+    }
+  }
+  return left.localeCompare(right);
+}
+
+function organizeReadsForDisplay(reads, state) {
+  const sortedReads = [...(reads || [])].sort((left, right) => compareReads(left, right, state));
+  if (state.alignmentGroup === "none") {
+    return [
+      {
+        label: "",
+        reads: sortedReads,
+      },
+    ];
+  }
+
+  const groups = new Map();
+  sortedReads.forEach((read) => {
+    const label = groupLabel(read, state.alignmentGroup);
+    if (!groups.has(label)) {
+      groups.set(label, []);
+    }
+    groups.get(label).push(read);
+  });
+
+  return [...groups.entries()]
+    .sort(([leftLabel], [rightLabel]) => compareGroupLabels(leftLabel, rightLabel, state.alignmentGroup))
+    .map(([label, groupReads]) => ({
+      label,
+      reads: groupReads,
+    }));
 }
 
 function toggleReadFilter(key) {
@@ -783,10 +1002,12 @@ function zoomAroundVisibleViewport(factor) {
     }
     return;
   }
-  const center = Math.round((state.start + state.end) / 2);
+  const { centerBase } = currentViewportMetrics(state);
+  pendingCenterPosition = centerBase;
+  const center = centerBase;
   const nextStart = center - Math.floor(targetWidth / 2);
   const nextEnd = nextStart + targetWidth - 1;
-  updateWindow({ start: nextStart, end: nextEnd });
+  updateWindow({ start: nextStart, end: nextEnd }, null, { preserveScroll: true });
 }
 
 function shiftWindow(direction) {
@@ -799,7 +1020,7 @@ function shiftWindow(direction) {
   });
 }
 
-function updateWindow(nextWindow, nextContig = null) {
+function updateWindow(nextWindow, nextContig = null, options = {}) {
   const state = store.getState();
   const contig = nextContig || state.contig;
   const contigMeta = getContigMeta(contig, state.session);
@@ -809,7 +1030,10 @@ function updateWindow(nextWindow, nextContig = null) {
   }
 
   const normalized = normalizeWindow(contigMeta.length, nextWindow.start, nextWindow.end);
-  sharedScrollLeft = 0;
+  if (!options.preserveScroll) {
+    sharedScrollLeft = 0;
+    pendingCenterPosition = null;
+  }
   store.setState({
     contig,
     contigLength: contigMeta.length,
@@ -935,6 +1159,7 @@ async function applySession(payload, message = "Loaded local files") {
     setSessionInputs(session);
     const firstContig = session.contigs[0];
     sharedScrollLeft = 0;
+    pendingCenterPosition = null;
     store.setState({
       session,
       contig: firstContig.name,
@@ -1155,11 +1380,11 @@ function attachEvents() {
   });
 
   elements.zoomInButton.addEventListener("click", () => {
-    zoomAroundVisibleViewport(0.75);
+    zoomAroundVisibleViewport(0.5);
   });
 
   elements.zoomOutButton.addEventListener("click", () => {
-    zoomAroundVisibleViewport(4 / 3);
+    zoomAroundVisibleViewport(2);
   });
 
   attachDropZone();
@@ -1169,24 +1394,32 @@ function attachEvents() {
 }
 
 async function initialize() {
-  attachEvents();
   try {
-    const session = await fetchManifest();
-    if (!session.contigs || session.contigs.length === 0) {
+    attachEvents();
+    const manifest = await fetchManifest();
+    if (!manifest.contigs || manifest.contigs.length === 0) {
       throw new Error("Reference FASTA with .fai index is required. Use the demo generator or load local files.");
     }
-
-    updateContigOptions(session);
-    setSessionInputs(session);
-    const firstContig = session.contigs[0];
+    updateContigOptions(manifest);
+    setSessionInputs(manifest);
+    const firstContig = manifest.contigs[0];
+    sharedScrollLeft = 0;
+    pendingCenterPosition = null;
     store.setState({
-      session,
+      session: manifest,
       contig: firstContig.name,
       contigLength: firstContig.length,
       start: 1,
       end: firstContig.length,
+      reference: null,
+      alignments: null,
+      variants: [],
+      nearbyVariants: [],
+      annotations: [],
+      selectedVariant: null,
+      loadingReads: false,
     });
-
+    setStatus("Loaded demo session");
     await refreshWindow();
   } catch (error) {
     setStatus(error.message, true);
