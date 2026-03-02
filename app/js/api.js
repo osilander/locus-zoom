@@ -35,8 +35,12 @@ export async function fetchReference(contig, start, end, options = {}) {
 export async function fetchAlignments(contig, start, end, options = {}) {
   const includeReads = options.includeReads === false ? "0" : "1";
   const bins = options.bins ? `&bins=${options.bins}` : "";
+  const readPaths = options.readPaths?.length
+    ? `&readPaths=${encodeURIComponent(options.readPaths.join(","))}`
+    : "";
+  const includeCoverage = options.includeCoverage === false ? "&includeCoverage=0" : "";
   return request(
-    `/api/alignments?contig=${encodeURIComponent(contig)}&start=${start}&end=${end}&includeReads=${includeReads}${bins}`,
+    `/api/alignments?contig=${encodeURIComponent(contig)}&start=${start}&end=${end}&includeReads=${includeReads}${bins}${readPaths}${includeCoverage}`,
     options
   );
 }

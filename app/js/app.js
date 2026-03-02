@@ -16,6 +16,7 @@ const store = createStore({
   annotations: [],
   selectedVariant: null,
   loadingReads: false,
+  loadingReadTracks: [],
   alignmentSort: "base",
   alignmentGroup: "none",
   coverageLogScale: false,
@@ -75,13 +76,15 @@ let syncingScroll = false;
 let refreshToken = 0;
 let activeWindowController = null;
 let activeReadsController = null;
+let activeReadsTimeoutId = null;
 let scheduledRefreshTimer = null;
 let pendingCenterPosition = null;
 const REFERENCE_SEQUENCE_MAX_BASES = 5000;
 const COVERAGE_BIN_THRESHOLD = 5000;
 const COVERAGE_BIN_COUNT = 900;
 const READ_AUTOLOAD_MAX_BASES = 10000;
-const INITIAL_SESSION_WINDOW_BASES = 10000;
+const READ_FETCH_TIMEOUT_MS = 10000;
+const DEFAULT_CONTIG_WINDOW_BASES = 100000;
 const WINDOW_CACHE_LIMIT = 18;
 const REFRESH_DEBOUNCE_MS = 90;
 const windowCache = {
@@ -215,16 +218,138 @@ function getCached(cache, key) {
 }
 
 function setCached(cache, key, value) {
-  cache.set(key, value);
+  const taggedValue = value && typeof value === "object"
+    ? {
+      ...value,
+      __cacheSessionKey: sessionCacheKey(store.getState().session),
+    }
+    : value;
+  cache.set(key, taggedValue);
   while (cache.size > WINDOW_CACHE_LIMIT) {
     const firstKey = cache.keys().next().value;
     cache.delete(firstKey);
   }
-  return value;
+  return taggedValue;
 }
 
 function clearWindowCaches() {
   Object.values(windowCache).forEach((cache) => cache.clear());
+}
+
+function clearActiveReadsTimeout() {
+  if (activeReadsTimeoutId) {
+    clearTimeout(activeReadsTimeoutId);
+    activeReadsTimeoutId = null;
+  }
+}
+
+function exactCoverageSubset(payload, start, end) {
+  if (!payload || payload.coverageBinned) {
+    return null;
+  }
+  if (payload.start > start || payload.end < end) {
+    return null;
+  }
+  return {
+    ...payload,
+    start,
+    end,
+    tracks: (payload.tracks || []).map((track) => ({
+      ...track,
+      coverage: (track.coverage || []).filter((point) => {
+        const pointStart = point.start ?? point.position ?? 0;
+        const pointEnd = point.end ?? point.position ?? 0;
+        return pointEnd >= start && pointStart <= end;
+      }),
+      reads: [],
+      readsLoaded: false,
+      totalReadCount: 0,
+      truncated: false,
+    })),
+    truncated: false,
+    totalReadCount: 0,
+    readsLoaded: false,
+    loadedReadPaths: [],
+  };
+}
+
+function findRangeCached(cache, state, deriveValue) {
+  const currentSessionKey = sessionCacheKey(state.session);
+  for (const value of cache.values()) {
+    if (!value || value.contig !== state.contig) {
+      continue;
+    }
+    if (value.__cacheSessionKey !== currentSessionKey) {
+      continue;
+    }
+    if (value.start > state.start || value.end < state.end) {
+      continue;
+    }
+    const derived = deriveValue(value);
+    if (derived) {
+      return derived;
+    }
+  }
+  return null;
+}
+
+function getCachedReferenceWindow(state, key) {
+  const exact = getCached(windowCache.reference, key);
+  if (exact) {
+    return exact;
+  }
+  return findRangeCached(windowCache.reference, state, (cached) => {
+    if (!cached.sequence) {
+      return null;
+    }
+    const offsetStart = Math.max(state.start - cached.start, 0);
+    const offsetEnd = offsetStart + (state.end - state.start + 1);
+    return {
+      contig: state.contig,
+      start: state.start,
+      end: state.end,
+      sequence: cached.sequence.slice(offsetStart, offsetEnd),
+    };
+  });
+}
+
+function getCachedCoverageWindow(state, key) {
+  const exact = getCached(windowCache.coverage, key);
+  if (exact) {
+    return exact;
+  }
+  return findRangeCached(windowCache.coverage, state, (cached) => exactCoverageSubset(cached, state.start, state.end));
+}
+
+function mergeReadTracks(existingAlignments, readPayload) {
+  if (!existingAlignments) {
+    return readPayload;
+  }
+  const tracksByPath = new Map((readPayload.tracks || []).map((track) => [track.path, track]));
+  const mergedTracks = (existingAlignments.tracks || []).map((track) => {
+    const incoming = tracksByPath.get(track.path);
+    if (!incoming || !incoming.readsLoaded) {
+      return track;
+    }
+    return {
+      ...track,
+      reads: incoming.reads,
+      truncated: incoming.truncated,
+      totalReadCount: incoming.totalReadCount,
+      readsLoaded: true,
+    };
+  });
+  return {
+    ...existingAlignments,
+    truncated: mergedTracks.some((track) => track.truncated),
+    totalReadCount: mergedTracks.reduce((sum, track) => sum + (track.readsLoaded ? (track.totalReadCount || 0) : 0), 0),
+    readsLoaded: false,
+    loadedReadPaths: Array.from(new Set([
+      ...(existingAlignments.loadedReadPaths || []),
+      ...(readPayload.loadedReadPaths || []),
+    ])),
+    tracks: mergedTracks,
+  };
 }
 
 function scheduleRefresh(immediate = false) {
@@ -294,6 +419,7 @@ async function refreshWindow() {
   if (activeReadsController) {
     activeReadsController.abort();
     activeReadsController = null;
+    clearActiveReadsTimeout();
   }
   activeWindowController = new AbortController();
 
@@ -315,6 +441,7 @@ async function refreshWindow() {
     truncated: false,
     totalReadCount: 0,
     readsLoaded: false,
+    loadedReadPaths: [],
     coverageBinned: coverageBins > 0,
   };
 
@@ -338,8 +465,8 @@ async function refreshWindow() {
     const variantsKey = windowKey(state, "vars");
     const annotationsKey = windowKey(state, "ann");
 
-    const cachedReference = getCached(windowCache.reference, referenceKey);
-    const cachedCoverage = getCached(windowCache.coverage, coverageKey);
+    const cachedReference = getCachedReferenceWindow(state, referenceKey);
+    const cachedCoverage = getCachedCoverageWindow(state, coverageKey);
     const cachedVariants = getCached(windowCache.variants, variantsKey);
     const cachedAnnotations = getCached(windowCache.annotations, annotationsKey);
 
@@ -363,15 +490,25 @@ async function refreshWindow() {
     setCached(windowCache.variants, variantsKey, variantsPayload);
     setCached(windowCache.annotations, annotationsKey, annotationsPayload);
 
+    const latestState = store.getState();
+    const canReuseLoadedReads = latestState.contig === state.contig
+      && latestState.start === state.start
+      && latestState.end === state.end
+      && latestState.alignments
+      && (latestState.alignments.loadedReadPaths || []).length > 0;
+    const nextAlignments = canReuseLoadedReads
+      ? mergeReadTracks(alignments, latestState.alignments)
+      : alignments;
+
     const selectedVariant = state.selectedVariant
       ? variantsPayload.variants.find((variant) => variant.id === state.selectedVariant.id) || null
       : null;
 
-    const trackUiState = deriveTrackUiState(alignments.tracks || [], state);
+    const trackUiState = deriveTrackUiState(nextAlignments.tracks || [], state);
 
     store.setState({
       reference,
-      alignments,
+      alignments: nextAlignments,
       variants: variantsPayload.variants,
       nearbyVariants: variantsPayload.nearbyVariants || [],
       annotations: annotationsPayload.annotations,
@@ -380,6 +517,7 @@ async function refreshWindow() {
       collapsedTracks: trackUiState.collapsedTracks,
       coverageOnlyTracks: trackUiState.coverageOnlyTracks,
       loadingReads: false,
+      loadingReadTracks: [],
     });
     setStatus("Loaded locus");
   } catch (error) {
@@ -426,12 +564,13 @@ function render(state) {
 
   const alignmentTracks = state.alignments.tracks || [];
   const depths = alignmentTracks.flatMap((track) => (track.coverage || []).map((point) => point.depth));
-  const totalReadCount = state.alignments.totalReadCount || alignmentTracks.reduce((sum, track) => sum + (track.totalReadCount || 0), 0);
+  const loadedTracks = alignmentTracks.filter((track) => track.readsLoaded);
+  const totalReadCount = loadedTracks.reduce((sum, track) => sum + (track.totalReadCount || 0), 0);
   renderSummary(elements.summaryList, {
     contig: state.contig,
     start: state.start,
     end: state.end,
-    readCount: state.alignments.readsLoaded ? totalReadCount : "coverage only",
+    readCount: loadedTracks.length ? totalReadCount : "coverage only",
     variantCount: state.variants.length,
     annotationCount: state.annotations.length,
     maxDepth: depths.length ? Math.max(...depths) : 0,
@@ -443,13 +582,24 @@ function render(state) {
 
 function renderPendingTracks(state) {
   elements.referenceTrack.textContent = state.contig ? "Loading reference..." : "No reference sequence loaded.";
+  const hasAlignmentFiles = Boolean(state.session?.bams?.length);
+  const pendingMeta = state.contig
+    ? "Loading coverage"
+    : hasAlignmentFiles
+      ? `${state.session.bams.length} BAM tracks ready`
+      : "No BAM tracks loaded";
+  const pendingBody = state.contig
+    ? "Loading coverage for the selected locus..."
+    : hasAlignmentFiles
+      ? "Select a contig or locus to inspect coverage and read evidence."
+      : "Load one or more BAM / CRAM files to inspect read evidence.";
   elements.alignmentTrackStack.innerHTML = `
     <div class="track-card">
       <div class="track-header">
         <span>Alignments</span>
-        <span class="track-meta">${state.contig ? "Loading reads" : "No BAM tracks loaded"}</span>
+        <span class="track-meta">${pendingMeta}</span>
       </div>
-      <div class="track-body muted">${state.contig ? "Loading alignments for the selected locus..." : "Load one or more BAM / CRAM files to inspect read evidence."}</div>
+      <div class="track-body muted">${pendingBody}</div>
     </div>
   `;
   elements.variantList.textContent = state.reference ? "" : "Loading variants...";
@@ -488,8 +638,9 @@ function renderAlignmentTracks(state) {
   const bulkPrimaryButton = document.createElement("button");
   bulkPrimaryButton.type = "button";
   bulkPrimaryButton.className = "track-inline-button";
-  if (state.alignments?.readsLoaded === false) {
-    bulkPrimaryButton.textContent = "Load Reads In View";
+  const anyTrackMissingReads = tracks.some((track) => !track.readsLoaded);
+  if (anyTrackMissingReads) {
+    bulkPrimaryButton.textContent = "Load All Reads In View";
     bulkPrimaryButton.disabled = Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES || state.loadingReads;
     bulkPrimaryButton.addEventListener("click", () => loadReadsForCurrentWindow());
   } else {
@@ -557,9 +708,10 @@ function renderAlignmentTracks(state) {
 
     const meta = document.createElement("span");
     meta.className = "track-meta";
-    meta.textContent = state.loadingReads
+    const trackLoadingReads = Boolean(state.loadingReadTracks?.includes(track.path));
+    meta.textContent = trackLoadingReads
       ? "Coverage loaded, reads loading"
-      : state.alignments.readsLoaded === false
+      : !track.readsLoaded
         ? `Coverage only (${Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES ? `zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to load reads` : "click Load Reads for this locus"})`
         : track.truncated
         ? `${track.reads.length} reads shown of ${track.totalReadCount}`
@@ -577,10 +729,10 @@ function renderAlignmentTracks(state) {
     const readsButton = document.createElement("button");
     readsButton.type = "button";
     readsButton.className = "track-inline-button";
-    if (state.alignments?.readsLoaded === false) {
+    if (!track.readsLoaded) {
       readsButton.textContent = "Load Reads";
       readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]) || state.loadingReads || Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES;
-      readsButton.addEventListener("click", () => loadReadsForCurrentWindow());
+      readsButton.addEventListener("click", () => loadReadsForCurrentWindow(track.path));
     } else {
       readsButton.textContent = state.coverageOnlyTracks?.[track.path] ? "Show Reads" : "Coverage Only";
       readsButton.disabled = Boolean(state.collapsedTracks?.[track.path]);
@@ -658,9 +810,9 @@ function renderAlignmentTracks(state) {
             state.selectedVariant,
           {
             cursorPosition: sortCursorPosition(state),
-            emptyMessage: state.loadingReads
+            emptyMessage: trackLoadingReads
               ? "Loading reads for this locus..."
-              : state.alignments.readsLoaded === false
+              : !track.readsLoaded
               ? (Math.max(state.end - state.start + 1, 1) > READ_AUTOLOAD_MAX_BASES
                 ? `Zoom in below ${READ_AUTOLOAD_MAX_BASES} bp to load reads`
                 : "Click Load Reads for this locus")
@@ -867,12 +1019,13 @@ function toggleReadFilter(key) {
   });
 }
 
-async function loadReadsForCurrentWindow() {
+async function loadReadsForCurrentWindow(trackPath = null) {
   const state = store.getState();
   if (!state.contig || !state.alignments || state.loadingReads) {
     return;
   }
-  if (state.alignments.readsLoaded) {
+  const targetPaths = trackPath ? [trackPath] : (state.alignments.tracks || []).filter((track) => !track.readsLoaded).map((track) => track.path);
+  if (!targetPaths.length) {
     setStatus("Reads already loaded for this locus");
     return;
   }
@@ -882,12 +1035,13 @@ async function loadReadsForCurrentWindow() {
     return;
   }
 
-  const readsKey = windowKey(state, "reads");
+  const readsKey = windowKey(state, `reads:${targetPaths.join("|")}`);
   const cachedReads = getCached(windowCache.reads, readsKey);
   if (cachedReads) {
     store.setState({
-      alignments: cachedReads,
+      alignments: mergeReadTracks(state.alignments, cachedReads),
       loadingReads: false,
+      loadingReadTracks: [],
     });
     setStatus(
       cachedReads.truncated
@@ -898,27 +1052,47 @@ async function loadReadsForCurrentWindow() {
   }
   if (activeReadsController) {
     activeReadsController.abort();
+    clearActiveReadsTimeout();
   }
 
   const requestToken = refreshToken + 1;
   refreshToken = requestToken;
   activeReadsController = new AbortController();
-  store.setState({ loadingReads: true });
+  activeReadsTimeoutId = window.setTimeout(() => {
+    if (activeReadsController) {
+      activeReadsController.abort();
+    }
+  }, READ_FETCH_TIMEOUT_MS);
+  store.setState({ loadingReads: true, loadingReadTracks: targetPaths });
   setStatus("Loading reads", false, { progress: 0.82, loading: true });
 
   try {
     const readAlignments = await fetchAlignments(state.contig, state.start, state.end, {
       includeReads: true,
+      includeCoverage: false,
+      readPaths: targetPaths,
       signal: activeReadsController.signal,
     });
     if (requestToken !== refreshToken) {
       return;
     }
+    if (!(readAlignments.loadedReadPaths || []).length) {
+      clearActiveReadsTimeout();
+      activeReadsController = null;
+      store.setState({
+        loadingReads: false,
+        loadingReadTracks: [],
+      });
+      setStatus("No reads were returned for the selected track. Try a smaller window or reload the locus.", true);
+      return;
+    }
+    clearActiveReadsTimeout();
     activeReadsController = null;
     setCached(windowCache.reads, readsKey, readAlignments);
     store.setState({
-      alignments: readAlignments,
+      alignments: mergeReadTracks(store.getState().alignments, readAlignments),
       loadingReads: false,
+      loadingReadTracks: [],
     });
     setStatus(
       readAlignments.truncated
@@ -926,12 +1100,18 @@ async function loadReadsForCurrentWindow() {
         : "Loaded reads"
     );
   } catch (error) {
+    clearActiveReadsTimeout();
     if (isAbortError(error)) {
+      if (requestToken === refreshToken) {
+        activeReadsController = null;
+        store.setState({ loadingReads: false, loadingReadTracks: [] });
+        setStatus("Read loading timed out after 10 seconds. Try a smaller window.", true);
+      }
       return;
     }
     if (requestToken === refreshToken) {
       activeReadsController = null;
-      store.setState({ loadingReads: false });
+      store.setState({ loadingReads: false, loadingReadTracks: [] });
       setStatus(error.message, true);
     }
   }
@@ -1056,6 +1236,7 @@ function updateWindow(nextWindow, nextContig = null, options = {}) {
     annotations: [],
     selectedVariant: null,
     loadingReads: false,
+    loadingReadTracks: [],
   });
   scheduleRefresh();
 }
@@ -1077,6 +1258,7 @@ function handleVariantPick(variant) {
     nearbyVariants: [],
     annotations: [],
     loadingReads: false,
+    loadingReadTracks: [],
   });
   scheduleRefresh(true);
 }
@@ -1239,13 +1421,14 @@ async function applySession(payload, message = "Loaded local files") {
     if (activeReadsController) {
       activeReadsController.abort();
       activeReadsController = null;
+      clearActiveReadsTimeout();
     }
     clearWindowCaches();
     const session = await loadSession(payload);
     updateContigOptions(session);
     setSessionInputs(session);
     const firstContig = session.contigs[0];
-    const initialEnd = Math.min(firstContig.length, INITIAL_SESSION_WINDOW_BASES);
+    const initialEnd = Math.min(firstContig.length, DEFAULT_CONTIG_WINDOW_BASES);
     sharedScrollLeft = 0;
     pendingCenterPosition = null;
     store.setState({
@@ -1261,6 +1444,7 @@ async function applySession(payload, message = "Loaded local files") {
       annotations: [],
       selectedVariant: null,
       loadingReads: false,
+      loadingReadTracks: [],
     });
     setStatus(message, false, { progress: 0.4, loading: true });
     await refreshWindow();
@@ -1455,7 +1639,7 @@ function attachEvents() {
       setStatus("Unknown contig", true);
       return;
     }
-    updateWindow({ start: 1, end: contigMeta.length }, contig);
+    updateWindow({ start: 1, end: Math.min(contigMeta.length, DEFAULT_CONTIG_WINDOW_BASES) }, contig);
   });
 
   elements.homeButton.addEventListener("click", () => {
@@ -1504,6 +1688,7 @@ async function initialize() {
     updateContigOptions(manifest);
     setSessionInputs(manifest);
     const firstContig = manifest.contigs[0];
+    const initialEnd = Math.min(firstContig.length, DEFAULT_CONTIG_WINDOW_BASES);
     sharedScrollLeft = 0;
     pendingCenterPosition = null;
     store.setState({
@@ -1511,7 +1696,7 @@ async function initialize() {
       contig: firstContig.name,
       contigLength: firstContig.length,
       start: 1,
-      end: firstContig.length,
+      end: initialEnd,
       reference: null,
       alignments: null,
       variants: [],
@@ -1519,6 +1704,7 @@ async function initialize() {
       annotations: [],
       selectedVariant: null,
       loadingReads: false,
+      loadingReadTracks: [],
     });
     setStatus("Loaded demo session");
     await refreshWindow();

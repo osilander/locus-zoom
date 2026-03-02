@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+import traceback
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -225,6 +226,28 @@ def run_samtools(args: List[str]) -> str:
     return run_command([samtools_executable(), *args])
 
 
+def run_samtools_view_tolerant(path: Path, region: str) -> str:
+    args = [samtools_executable(), "view", str(path), region]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout
+
+    stderr = (result.stderr or "").strip()
+    tolerable_close_error = (
+        result.stdout
+        and "samtools view: error closing" in stderr
+    )
+    if tolerable_close_error:
+        return result.stdout
+
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        args,
+        output=result.stdout,
+        stderr=result.stderr,
+    )
+
+
 def available_backend() -> str:
     configured = os.environ.get("GENOME_EXPLORER_BACKEND", "auto").strip().lower()
     if configured not in {"auto", "pysam", "samtools"}:
@@ -240,6 +263,38 @@ def available_backend() -> str:
         return "pysam"
     samtools_executable()
     return "samtools"
+
+
+def split_read_paths_param(raw_value: str) -> Set[str]:
+    if not raw_value:
+        return set()
+    return {
+        urllib.parse.unquote(part).strip()
+        for part in raw_value.split(",")
+        if urllib.parse.unquote(part).strip()
+    }
+
+
+def bam_matches_requested_path(bam: Path, requested_paths: Set[str]) -> bool:
+    if not requested_paths:
+        return True
+    candidates = {
+        str(bam),
+        bam.name,
+    }
+    try:
+        candidates.add(str(bam.resolve()))
+    except OSError:
+        pass
+    for requested in requested_paths:
+        if requested in candidates:
+            return True
+        try:
+            if Path(requested).name == bam.name:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def backend_health() -> Dict:
@@ -750,8 +805,18 @@ def read_alignment_records(path: Path, contig: str, start: int, end: int) -> Lis
                 for segment in handle.fetch(contig, max(start - 1, 0), end)
             ]
     region = f"{contig}:{start}-{end}"
-    output = run_samtools(["view", str(path), region])
-    return [parse_sam_line(line) for line in output.splitlines() if line.strip()]
+    output = run_samtools_view_tolerant(path, region)
+    records: List[Dict] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(parse_sam_line(line))
+        except Exception:
+            # Real BAMs can contain records our lightweight parser does not fully
+            # understand yet. Skip those instead of failing the entire locus.
+            continue
+    return records
 
 
 def empty_base_counts() -> Dict[str, int]:
@@ -1197,11 +1262,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else "Command failed"
+            print(f"[api error] {parsed.path} subprocess failed: {stderr}", file=sys.stderr)
             try:
                 self.write_json({"error": stderr}, status=500)
             except (BrokenPipeError, ConnectionResetError):
                 return
         except Exception as exc:
+            print(f"[api error] {parsed.path}: {exc}", file=sys.stderr)
+            traceback.print_exc()
             try:
                 self.write_json({"error": str(exc)}, status=400)
             except (BrokenPipeError, ConnectionResetError):
@@ -1265,7 +1333,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         end = int(query.get("end", ["1"])[0])
         limit = int(query.get("limit", ["2500"])[0])
         include_reads = query.get("includeReads", ["1"])[0] != "0"
+        include_coverage = query.get("includeCoverage", ["1"])[0] != "0"
         bins = max(0, int(query.get("bins", ["0"])[0]))
+        selected_read_paths = split_read_paths_param(query.get("readPaths", [""])[0])
         bams = SESSION.bams or []
         if not bams:
             self.write_json(
@@ -1287,24 +1357,28 @@ class RequestHandler(BaseHTTPRequestHandler):
         any_truncated = False
 
         for bam in bams:
-            if include_reads:
+            should_load_reads = include_reads and bam_matches_requested_path(bam, selected_read_paths)
+            if should_load_reads:
                 all_reads = read_alignment_records(bam, contig, start, end)
                 reads = sample_reads_for_display(all_reads, limit)
-                coverage = compute_coverage(all_reads, start, end)
+                coverage = compute_coverage(all_reads, start, end) if include_coverage else []
                 total_read_count += len(all_reads)
                 any_truncated = any_truncated or len(all_reads) > limit
                 truncated = len(all_reads) > limit
             else:
                 reads = []
-                if bins > 0:
-                    coverage = summarize_coverage_points(
-                        read_depth_coverage(bam, contig, start, end),
-                        start,
-                        end,
-                        bins,
-                    )
+                if include_coverage:
+                    if bins > 0:
+                        coverage = summarize_coverage_points(
+                            read_depth_coverage(bam, contig, start, end),
+                            start,
+                            end,
+                            bins,
+                        )
+                    else:
+                        coverage = read_depth_coverage(bam, contig, start, end)
                 else:
-                    coverage = read_depth_coverage(bam, contig, start, end)
+                    coverage = []
                 truncated = False
             tracks.append(
                 {
@@ -1313,7 +1387,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "coverage": coverage,
                     "reads": reads,
                     "truncated": truncated,
-                    "totalReadCount": len(reads) if include_reads else 0,
+                    "totalReadCount": len(all_reads) if should_load_reads else 0,
+                    "readsLoaded": should_load_reads,
                 }
             )
 
@@ -1325,8 +1400,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "tracks": tracks,
                 "truncated": any_truncated,
                 "totalReadCount": total_read_count,
-                "readsLoaded": include_reads,
-                "coverageBinned": (not include_reads) and bins > 0,
+                "readsLoaded": include_reads and not selected_read_paths,
+                "loadedReadPaths": [track["path"] for track in tracks if track["readsLoaded"]],
+                "coverageBinned": include_coverage and (not include_reads) and bins > 0,
             }
         )
 

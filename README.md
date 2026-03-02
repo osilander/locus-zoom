@@ -49,11 +49,21 @@ If `git` is not convenient, you can also download the repository ZIP from GitHub
 - or `samtools` installed on `PATH` as a fallback
 - a modern browser (Chrome, Edge, Safari, Firefox)
 
+For large real BAMs, install `pysam`. The `samtools` fallback works, but it is materially slower for repeated region queries.
+
 This MVP covers three linked workflows:
 
 - explore a reference genome by locus
 - inspect mapped alignments from an indexed BAM
 - inspect VCF variants in the current window and jump between variants and read evidence
+
+For large or remote BAMs, the viewer is intentionally coverage-first:
+
+- the session opens without loading read piles automatically
+- coverage loads before reads
+- reads are fetched only when you click `Load Reads`
+- reads can be loaded per BAM track, so one slow BAM does not block every track
+- read fetches time out after 10 seconds so the UI does not hang indefinitely on slow storage
 
 ## Why this shape
 
@@ -140,10 +150,9 @@ $env:HOST="127.0.0.1"; $env:PORT="8765"; py -3 server.py
 
 ## Windows Notes
 
-- The prototype still depends on `samtools` being installed and available on `PATH`.
-- On Windows that usually means `samtools.exe`.
 - If `pysam` is installed from `requirements-production.txt`, the backend uses that native path and no external `samtools` is required.
-- If `pysam` is not installed, the backend checks for `samtools` at startup and returns a clear error if it is missing.
+- If `pysam` is not installed, the backend falls back to `samtools`, which on Windows usually means `samtools.exe` on `PATH`.
+- The fallback path works, but it is noticeably slower on large BAMs than the `pysam` path.
 
 ## Health Check
 
@@ -182,6 +191,10 @@ The BAMs are synthetic long-read demos and load as three tracks by default so th
 - single reference assembly at a time
 - three demo BAMs, one demo VCF, and one demo GFF wired by default
 - live local session loading by file path
+- coverage-first navigation with manual `Load Reads` for the current locus
+- per-BAM `Load Reads` so only the selected BAM needs to parse reads
+- 10 second timeout on read fetches for slow or remote BAM access
+- overlap-aware reuse of recent reference and exact coverage windows
 - API optimized for local use and small windows
 - VCF `ANN` / `CSQ` parsing is shown in the selected-variant panel
 - AlphaGenome backend integration exists, but it is intentionally hidden from the UI until result rendering is complete
