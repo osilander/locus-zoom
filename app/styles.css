@@ -614,6 +614,13 @@ button:hover {
   background: var(--read-supplementary);
 }
 
+.reads-color-off .read-overview-bar,
+.reads-color-off .read-overview-bar.reverse,
+.reads-color-off .read-overview-bar.secondary,
+.reads-color-off .read-overview-bar.supplementary {
+  background: rgba(96, 196, 233, 0.72);
+}
+
 .read-overview-bar.low-mapq {
   opacity: 0.45;
 }
@@ -705,6 +712,11 @@ button:hover {
   background-image: linear-gradient(rgba(193, 143, 47, 0.28), rgba(193, 143, 47, 0.28));
 }
 
+.reads-color-off .base.forward,
+.reads-color-off .base.reverse {
+  background-image: none;
+}
+
 .base.secondary::after,
 .base.supplementary::after {
   content: "";
@@ -722,6 +734,11 @@ button:hover {
   inset: 0;
   border: 2px solid var(--read-supplementary);
   border-radius: 4px;
+}
+
+.reads-color-off .base.secondary::after,
+.reads-color-off .base.supplementary::after {
+  border-color: rgba(36, 48, 70, 0.38);
 }
 
 .base.low-mapq {
@@ -795,6 +812,10 @@ button:hover {
 
 .read-status-rail.low-mapq {
   opacity: 0.5;
+}
+
+.reads-color-off .read-status-rail {
+  display: none;
 }
 
 .read-variant-marker {

@@ -18,6 +18,7 @@ const store = createStore({
   loadingReads: false,
   loadingReadTracks: [],
   autoLoadReads: false,
+  readColoringEnabled: true,
   alignmentSort: "base",
   alignmentGroup: "none",
   coverageLogScale: false,
@@ -152,6 +153,10 @@ function applyReadPalette(paletteName) {
   root.style.setProperty("--read-direction-reverse", palette.directionReverse);
 }
 
+function applyReadColoring(enabled) {
+  document.documentElement.classList.toggle("reads-color-off", !enabled);
+}
+
 function readPersistedAppState() {
   try {
     const raw = window.localStorage.getItem(APP_STATE_STORAGE_KEY);
@@ -241,16 +246,30 @@ function addBamRecentPath(path) {
   if (!normalized) {
     return;
   }
-  const existing = elements.bamPathInput.value
-    .split("\n")
+  const lines = elements.bamPathInput.value.split("\n");
+  const existing = lines
     .map((value) => value.trim())
     .filter(Boolean);
   if (existing.includes(normalized)) {
     return;
   }
-  elements.bamPathInput.value = existing.length
-    ? `${elements.bamPathInput.value.trim()}\n${normalized}`
-    : normalized;
+  const lastLine = lines.length ? lines[lines.length - 1].trim() : "";
+  if (!lastLine) {
+    const committed = lines
+      .slice(0, -1)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    elements.bamPathInput.value = [...committed, normalized].join("\n");
+  } else if (!existing.includes(lastLine)) {
+    const committed = lines
+      .slice(0, -1)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    elements.bamPathInput.value = [...committed, normalized].join("\n");
+  } else {
+    elements.bamPathInput.value = `${elements.bamPathInput.value.trim()}\n${normalized}`;
+  }
+  renderRecentPathSuggestions();
 }
 
 function renderRecentPathSuggestions(recentPaths = readRecentPaths()) {
@@ -263,9 +282,20 @@ function renderRecentPathSuggestions(recentPaths = readRecentPaths()) {
   }
 
   const bamPaths = dedupeRecentPaths(recentPaths.bams);
-  elements.bamRecentPaths.hidden = bamPaths.length === 0;
+  const currentBams = new Set(
+    elements.bamPathInput.value
+      .split("\n")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  const bamLines = elements.bamPathInput.value.split("\n");
+  const activeFragment = (bamLines.length ? bamLines[bamLines.length - 1] : "").trim();
+  const suggestedBams = activeFragment && !currentBams.has(activeFragment)
+    ? bamPaths.filter((path) => !currentBams.has(path) && path.toLowerCase().includes(activeFragment.toLowerCase()))
+    : bamPaths.filter((path) => !currentBams.has(path));
+  elements.bamRecentPaths.hidden = suggestedBams.length === 0;
   elements.bamRecentPaths.replaceChildren(
-    ...bamPaths.map((path) => {
+    ...suggestedBams.map((path) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "track-inline-button";
@@ -293,6 +323,7 @@ function persistAppState(state = store.getState()) {
       start: state.start,
       end: state.end,
       autoLoadReads: Boolean(state.autoLoadReads),
+      readColoringEnabled: Boolean(state.readColoringEnabled),
       alignmentSort: state.alignmentSort,
       alignmentGroup: state.alignmentGroup,
       coverageLogScale: Boolean(state.coverageLogScale),
@@ -1091,6 +1122,11 @@ function renderAlignmentTracks(state) {
   autoLoadButton.className = "track-inline-button";
   autoLoadButton.textContent = state.autoLoadReads ? "Auto Reads: On" : "Auto Reads: Off";
   autoLoadButton.addEventListener("click", toggleAutoLoadReads);
+  const readColoringButton = document.createElement("button");
+  readColoringButton.type = "button";
+  readColoringButton.className = "track-inline-button";
+  readColoringButton.textContent = state.readColoringEnabled ? "Read Colors: On" : "Read Colors: Off";
+  readColoringButton.addEventListener("click", toggleReadColoring);
   const paletteSelect = document.createElement("select");
   paletteSelect.className = "track-inline-select";
   paletteSelect.innerHTML = `
@@ -1106,6 +1142,7 @@ function renderAlignmentTracks(state) {
   bulkControls.appendChild(coverageScaleButton);
   bulkControls.appendChild(coverageMixButton);
   bulkControls.appendChild(autoLoadButton);
+  bulkControls.appendChild(readColoringButton);
   bulkControls.appendChild(paletteSelect);
   bulkControls.appendChild(filterSecondaryButton);
   bulkControls.appendChild(filterSupplementaryButton);
@@ -1339,6 +1376,15 @@ function toggleAutoLoadReads() {
   });
 }
 
+function toggleReadColoring() {
+  const state = store.getState();
+  const nextEnabled = !state.readColoringEnabled;
+  store.setState({
+    readColoringEnabled: nextEnabled,
+  });
+  applyReadColoring(nextEnabled);
+}
+
 function setReadColorPalette(value) {
   store.setState({ readColorPalette: value });
   applyReadPalette(value);
@@ -1375,7 +1421,7 @@ function baseSortRank(read, position) {
 
 function compareReads(left, right, state) {
   if (state.alignmentSort === "insertSize") {
-    const delta = Math.abs(right.insertSize || 0) - Math.abs(left.insertSize || 0);
+    const delta = Math.abs(Number(right.insertSize) || 0) - Math.abs(Number(left.insertSize) || 0);
     if (delta !== 0) {
       return delta;
     }
@@ -1392,8 +1438,10 @@ function compareReads(left, right, state) {
     }
   }
 
-  if (left.start !== right.start) {
-    return left.start - right.start;
+  const leftStart = Number(left.start) || 0;
+  const rightStart = Number(right.start) || 0;
+  if (leftStart !== rightStart) {
+    return leftStart - rightStart;
   }
   return (left.name || "").localeCompare(right.name || "");
 }
@@ -2040,6 +2088,7 @@ async function restorePersistedSession(savedState) {
     loadingReads: false,
     loadingReadTracks: [],
     autoLoadReads: Boolean(savedState.autoLoadReads),
+    readColoringEnabled: savedState.readColoringEnabled !== false,
     alignmentSort: savedState.alignmentSort || "base",
     alignmentGroup: savedState.alignmentGroup || "none",
     coverageLogScale: Boolean(savedState.coverageLogScale),
@@ -2048,6 +2097,7 @@ async function restorePersistedSession(savedState) {
     annotationExpanded: Boolean(savedState.annotationExpanded),
     loadedFilesCollapsed: Boolean(savedState.loadedFilesCollapsed),
   });
+  applyReadColoring(savedState.readColoringEnabled !== false);
   setStatus("Restored previous session", false, { progress: 0.35, loading: true });
   await refreshWindow();
   return true;
@@ -2219,6 +2269,10 @@ function attachEvents() {
     await applySession(buildSessionPayload());
   });
 
+  elements.bamPathInput.addEventListener("input", () => {
+    renderRecentPathSuggestions();
+  });
+
   elements.contigSelect.addEventListener("change", () => {
     const contig = elements.contigSelect.value;
     const contigMeta = getContigMeta(contig, store.getState().session);
@@ -2313,6 +2367,7 @@ async function initialize() {
   try {
     attachEvents();
     applyReadPalette(store.getState().readColorPalette);
+    applyReadColoring(store.getState().readColoringEnabled);
     renderRecentPathSuggestions();
     const savedState = readPersistedAppState();
     if (savedState) {

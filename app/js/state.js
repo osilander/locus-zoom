@@ -18,8 +18,11 @@ export function createStore(initialState) {
 }
 
 export function normalizeWindow(contigLength, start, end) {
-  const safeStart = Math.max(1, Math.min(start, contigLength));
-  const safeEnd = Math.max(safeStart, Math.min(end, contigLength));
+  const desiredWidth = Math.max(1, Math.round(end - start + 1));
+  const width = Math.min(desiredWidth, Math.max(contigLength, 1));
+  const maxStart = Math.max(1, contigLength - width + 1);
+  const safeStart = Math.max(1, Math.min(Math.round(start), maxStart));
+  const safeEnd = Math.min(contigLength, safeStart + width - 1);
   return { start: safeStart, end: safeEnd };
 }
 
