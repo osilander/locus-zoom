@@ -17,9 +17,12 @@ const store = createStore({
   selectedVariant: null,
   loadingReads: false,
   loadingReadTracks: [],
+  autoLoadReads: false,
   alignmentSort: "base",
   alignmentGroup: "none",
   coverageLogScale: false,
+  readColorPalette: "default",
+  annotationExpanded: false,
   readFilters: {
     hideSecondary: false,
     hideSupplementary: false,
@@ -54,6 +57,8 @@ const elements = {
   variantTrack: document.querySelector("#variant-track"),
   variantCanvas: document.querySelector("#variant-canvas"),
   annotationTrack: document.querySelector("#annotation-track"),
+  annotationTrackMeta: document.querySelector("#annotation-track-meta"),
+  annotationToggleButton: document.querySelector("#annotation-toggle-button"),
   variantList: document.querySelector("#variant-list"),
   variantDetail: document.querySelector("#variant-detail"),
   summaryList: document.querySelector("#summary-list"),
@@ -95,8 +100,42 @@ const windowCache = {
   reads: new Map(),
 };
 
+const READ_COLOR_PALETTES = {
+  default: {
+    reverse: "rgba(255, 184, 107, 0.8)",
+    secondary: "rgba(172, 189, 214, 0.9)",
+    supplementary: "rgba(255, 122, 162, 0.82)",
+    directionForward: "#2f89c6",
+    directionReverse: "#c18f2f",
+  },
+  contrast: {
+    reverse: "rgba(255, 140, 66, 0.9)",
+    secondary: "rgba(116, 137, 170, 0.92)",
+    supplementary: "rgba(220, 53, 69, 0.88)",
+    directionForward: "#1565c0",
+    directionReverse: "#d97706",
+  },
+  muted: {
+    reverse: "rgba(214, 163, 97, 0.76)",
+    secondary: "rgba(162, 172, 188, 0.86)",
+    supplementary: "rgba(214, 127, 160, 0.8)",
+    directionForward: "#4a8fb8",
+    directionReverse: "#b9853b",
+  },
+};
+
 function getHorizontalScrollers() {
   return Array.from(document.querySelectorAll("[data-sync-scroll='x']"));
+}
+
+function applyReadPalette(paletteName) {
+  const palette = READ_COLOR_PALETTES[paletteName] || READ_COLOR_PALETTES.default;
+  const root = document.documentElement;
+  root.style.setProperty("--read-reverse", palette.reverse);
+  root.style.setProperty("--read-secondary", palette.secondary);
+  root.style.setProperty("--read-supplementary", palette.supplementary);
+  root.style.setProperty("--read-direction-forward", palette.directionForward);
+  root.style.setProperty("--read-direction-reverse", palette.directionReverse);
 }
 
 function minWindowBasesForZoom() {
@@ -388,6 +427,14 @@ function syncControls(state) {
   elements.endInput.value = state.end;
   elements.locusInput.value = state.contig ? `${state.contig}:${state.start}-${state.end}` : "";
   elements.windowLabel.textContent = state.contig ? `${state.contig}:${state.start}-${state.end}` : "";
+  if (elements.annotationToggleButton) {
+    elements.annotationToggleButton.textContent = state.annotationExpanded ? "Collapse" : "Expand";
+  }
+  if (elements.annotationTrackMeta) {
+    elements.annotationTrackMeta.textContent = state.annotationExpanded
+      ? "Expanded annotation lanes (capped at 20 rows)"
+      : "Collapsed annotation lane (hover for detail)";
+  }
 }
 
 function renderSessionDetail(session) {
@@ -520,6 +567,23 @@ async function refreshWindow() {
       loadingReadTracks: [],
     });
     setStatus("Loaded locus");
+    if (
+      state.autoLoadReads
+      && windowWidth <= READ_AUTOLOAD_MAX_BASES
+      && (nextAlignments.tracks || []).some((track) => !track.readsLoaded)
+    ) {
+      window.setTimeout(() => {
+        const latest = store.getState();
+        if (
+          latest.contig === state.contig
+          && latest.start === state.start
+          && latest.end === state.end
+          && !latest.loadingReads
+        ) {
+          loadReadsForCurrentWindow();
+        }
+      }, 0);
+    }
   } catch (error) {
     if (isAbortError(error)) {
       return;
@@ -557,7 +621,10 @@ function render(state) {
     elements.annotationTrack,
     state.annotations,
     { start: state.start, end: state.end },
-    handleAnnotationPick
+    handleAnnotationPick,
+    {
+      expanded: state.annotationExpanded,
+    }
   );
   renderVariantList(elements.variantList, state.variants, state.nearbyVariants, state.selectedVariant, handleVariantPick);
   renderVariantDetail(elements.variantDetail, state.selectedVariant);
@@ -626,6 +693,7 @@ function renderAlignmentTracks(state) {
 
   const bulkCard = document.createElement("div");
   bulkCard.className = "track-card";
+  bulkCard.classList.add("sticky-controls-card");
   bulkCard.innerHTML = `
     <div class="track-header">
       <span>Alignment Track Controls</span>
@@ -687,13 +755,42 @@ function renderAlignmentTracks(state) {
   coverageScaleButton.className = "track-inline-button";
   coverageScaleButton.textContent = state.coverageLogScale ? "Coverage: Log" : "Coverage: Linear";
   coverageScaleButton.addEventListener("click", toggleCoverageScale);
+  const autoLoadButton = document.createElement("button");
+  autoLoadButton.type = "button";
+  autoLoadButton.className = "track-inline-button";
+  autoLoadButton.textContent = state.autoLoadReads ? "Auto Reads: On" : "Auto Reads: Off";
+  autoLoadButton.addEventListener("click", toggleAutoLoadReads);
+  const paletteSelect = document.createElement("select");
+  paletteSelect.className = "track-inline-select";
+  paletteSelect.innerHTML = `
+    <option value="default">Colors: Default</option>
+    <option value="contrast">Colors: Contrast</option>
+    <option value="muted">Colors: Muted</option>
+  `;
+  paletteSelect.value = state.readColorPalette;
+  paletteSelect.addEventListener("change", (event) => setReadColorPalette(event.target.value));
   bulkControls.appendChild(bulkPrimaryButton);
   bulkControls.appendChild(sortSelect);
   bulkControls.appendChild(groupSelect);
   bulkControls.appendChild(coverageScaleButton);
+  bulkControls.appendChild(autoLoadButton);
+  bulkControls.appendChild(paletteSelect);
   bulkControls.appendChild(filterSecondaryButton);
   bulkControls.appendChild(filterSupplementaryButton);
   bulkControls.appendChild(filterMapqButton);
+  const legend = document.createElement("div");
+  legend.className = "read-legend";
+  legend.innerHTML = `
+    <span class="read-legend-title">Read Colors</span>
+    <span class="read-legend-item"><span class="read-legend-swatch"></span>Forward</span>
+    <span class="read-legend-item"><span class="read-legend-swatch reverse"></span>Reverse</span>
+    <span class="read-legend-item"><span class="read-legend-swatch secondary"></span>Secondary</span>
+    <span class="read-legend-item"><span class="read-legend-swatch supplementary"></span>Supplementary</span>
+    <span class="read-legend-item"><span class="read-legend-swatch low-mapq"></span>Low MQ</span>
+    <span class="read-legend-item"><span class="read-legend-swatch mismatch"></span>Mismatch</span>
+    <span class="read-legend-item"><span class="read-legend-swatch known-variant"></span>VCF Site</span>
+  `;
+  bulkCard.appendChild(legend);
   elements.alignmentTrackStack.appendChild(bulkCard);
 
   tracks.forEach((track, index) => {
@@ -891,6 +988,18 @@ function toggleCoverageScale() {
   store.setState({
     coverageLogScale: !state.coverageLogScale,
   });
+}
+
+function toggleAutoLoadReads() {
+  const state = store.getState();
+  store.setState({
+    autoLoadReads: !state.autoLoadReads,
+  });
+}
+
+function setReadColorPalette(value) {
+  store.setState({ readColorPalette: value });
+  applyReadPalette(value);
 }
 
 function sortCursorPosition(state) {
@@ -1268,6 +1377,13 @@ function handleAnnotationPick(feature) {
   updateWindow({
     start: feature.start - padding,
     end: feature.end + padding,
+  });
+}
+
+function toggleAnnotationExpanded() {
+  const state = store.getState();
+  store.setState({
+    annotationExpanded: !state.annotationExpanded,
   });
 }
 
@@ -1671,6 +1787,10 @@ function attachEvents() {
     zoomAroundVisibleViewport(2);
   });
 
+  elements.annotationToggleButton.addEventListener("click", () => {
+    toggleAnnotationExpanded();
+  });
+
   attachDropZone();
   attachKeyboardShortcuts();
   attachHorizontalSync();
@@ -1680,6 +1800,7 @@ function attachEvents() {
 async function initialize() {
   try {
     attachEvents();
+    applyReadPalette(store.getState().readColorPalette);
     setStatus("Loading demo manifest", false, { progress: 0.08, loading: true });
     const manifest = await fetchManifest();
     if (!manifest.contigs || manifest.contigs.length === 0) {

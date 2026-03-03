@@ -45,7 +45,7 @@ function baseClass(base) {
 
 function buildBaseCell(base, absolutePosition, { selectedVariant = null, mismatch = false, reverse = false, deleted = false, skipped = false, inserted = false, secondary = false, supplementary = false, lowMapq = false } = {}) {
   const cell = document.createElement("span");
-  cell.className = `${baseClass(base)}${mismatch ? " mismatch" : ""}${reverse ? " reverse" : ""}`;
+  cell.className = `${baseClass(base)}${mismatch ? " mismatch" : ""}${reverse ? " reverse" : " forward"}`;
   if (deleted) {
     cell.classList.add("deletion");
   }
@@ -504,14 +504,24 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
         segment.title = `${laneReads.length} packed reads`;
 
         laneReads.forEach((read) => {
-          const directionPosition = firstVisibleReadPosition(read, referenceWindow);
-          if (directionPosition !== null) {
-            const directionMarker = document.createElement("span");
-            directionMarker.className = `read-direction-indicator${read.reverse ? " reverse" : ""}`;
-            directionMarker.style.left = `${(directionPosition - referenceWindow.start) * BASE_CELL_WIDTH}px`;
-            directionMarker.textContent = read.reverse ? "<" : ">";
-            directionMarker.title = `${read.name} ${read.reverse ? "reverse" : "forward"} strand`;
-            segment.appendChild(directionMarker);
+          const clippedStart = Math.max(read.start, referenceWindow.start);
+          const clippedEnd = Math.min(read.end, referenceWindow.end);
+          if (clippedEnd >= clippedStart) {
+            const left = (clippedStart - referenceWindow.start) * BASE_CELL_WIDTH;
+            const railWidth = Math.max((clippedEnd - clippedStart + 1) * BASE_CELL_WIDTH, 2);
+            const topRail = document.createElement("span");
+            topRail.className = `read-status-rail top${read.reverse ? " reverse" : " forward"}${read.secondary ? " secondary" : ""}${read.supplementary ? " supplementary" : ""}${read.mapq < 20 ? " low-mapq" : ""}`;
+            topRail.style.left = `${left}px`;
+            topRail.style.width = `${railWidth}px`;
+            topRail.title = `${read.name} ${read.reverse ? "reverse" : "forward"} strand`;
+            segment.appendChild(topRail);
+
+            const bottomRail = document.createElement("span");
+            bottomRail.className = `read-status-rail bottom${read.reverse ? " reverse" : " forward"}${read.secondary ? " secondary" : ""}${read.supplementary ? " supplementary" : ""}${read.mapq < 20 ? " low-mapq" : ""}`;
+            bottomRail.style.left = `${left}px`;
+            bottomRail.style.width = `${railWidth}px`;
+            bottomRail.title = `${read.name} ${read.reverse ? "reverse" : "forward"} strand`;
+            segment.appendChild(bottomRail);
           }
 
           (read.layout || []).forEach((entry) => {
@@ -589,35 +599,106 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
   });
 }
 
-export function renderAnnotations(target, annotations, windowState, onJump) {
+function packFeaturesIntoLanes(features, maxLanes = 20) {
+  const lanes = [];
+  const laneEnds = [];
+
+  features.forEach((feature) => {
+    let laneIndex = -1;
+    for (let index = 0; index < laneEnds.length; index += 1) {
+      if (feature.start > laneEnds[index]) {
+        laneIndex = index;
+        break;
+      }
+    }
+    if (laneIndex === -1) {
+      if (lanes.length >= maxLanes) {
+        return;
+      }
+      laneIndex = lanes.length;
+      lanes.push([]);
+      laneEnds.push(0);
+    }
+    lanes[laneIndex].push(feature);
+    laneEnds[laneIndex] = Math.max(laneEnds[laneIndex], feature.end);
+  });
+
+  return lanes;
+}
+
+export function renderAnnotations(target, annotations, windowState, onJump, options = {}) {
   target.innerHTML = "";
   if (!annotations || annotations.length === 0) {
     target.textContent = "No annotations in this locus.";
     return;
   }
 
-  annotations.forEach((feature) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "annotation-row";
+  const expanded = Boolean(options.expanded);
+  const totalWidth = Math.max(windowState.end - windowState.start + 1, 1);
+  const sorted = [...annotations].sort((left, right) => (
+    left.start - right.start || left.end - right.end || String(left.label).localeCompare(String(right.label))
+  ));
+  const positioned = sorted.map((feature) => {
     const left = Math.max(feature.start, windowState.start);
     const right = Math.min(feature.end, windowState.end);
     const visibleWidth = Math.max(right - left + 1, 1);
-    const totalWidth = Math.max(windowState.end - windowState.start + 1, 1);
     const offsetPercent = ((left - windowState.start) / totalWidth) * 100;
     const widthPercent = (visibleWidth / totalWidth) * 100;
-    row.innerHTML = `
-      <div class="annotation-header">
-        <span>${feature.label}</span>
-        <span class="annotation-meta">${feature.type} ${feature.start}-${feature.end}</span>
-      </div>
-      <div class="annotation-bar-shell">
-        <div class="annotation-bar" style="margin-left:${offsetPercent}%; width:${Math.max(widthPercent, 1)}%"></div>
-      </div>
-    `;
-    row.addEventListener("click", () => onJump(feature));
-    target.appendChild(row);
+    return {
+      feature,
+      left,
+      right,
+      visibleWidth,
+      offsetPercent,
+      widthPercent,
+    };
   });
+  const lanes = expanded
+    ? packFeaturesIntoLanes(sorted, 20).map((lane) => lane.map((feature) => (
+      positioned.find((entry) => entry.feature === feature)
+    )).filter(Boolean))
+    : [[...positioned].sort((left, right) => (
+      right.visibleWidth - left.visibleWidth
+      || left.feature.start - right.feature.start
+      || left.feature.end - right.feature.end
+    ))];
+  const visibleFeatureCount = lanes.reduce((sum, lane) => sum + lane.length, 0);
+
+  const shell = document.createElement("div");
+  shell.className = `annotation-lane-shell${expanded ? " expanded" : " collapsed"}`;
+  shell.style.height = `${Math.max(lanes.length, 1) * 24}px`;
+
+  lanes.forEach((lane, laneIndex) => {
+    lane.forEach((entry) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `annotation-chip${expanded ? "" : " collapsed"}`;
+      chip.style.left = `${entry.offsetPercent}%`;
+      chip.style.top = `${laneIndex * 24}px`;
+      chip.style.width = `${Math.max(entry.widthPercent, 1)}%`;
+      chip.title = `${entry.feature.label} | ${entry.feature.type} | ${entry.feature.start}-${entry.feature.end}`;
+      chip.innerHTML = `
+        <span class="annotation-chip-bar"></span>
+        <span class="annotation-chip-label">${entry.feature.label}</span>
+      `;
+      chip.addEventListener("click", () => onJump(entry.feature));
+      shell.appendChild(chip);
+    });
+  });
+
+  target.appendChild(shell);
+
+  if (expanded && visibleFeatureCount < annotations.length) {
+    const note = document.createElement("div");
+    note.className = "annotation-limit-note";
+    note.textContent = `Showing ${visibleFeatureCount} of ${annotations.length} annotations (20-row cap).`;
+    target.appendChild(note);
+  } else if (!expanded && annotations.length > 1) {
+    const note = document.createElement("div");
+    note.className = "annotation-limit-note";
+    note.textContent = `${annotations.length} annotations collapsed into one lane.`;
+    target.appendChild(note);
+  }
 }
 
 export function renderVariantList(target, variants, nearbyVariants, selectedVariant, onPick) {

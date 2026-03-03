@@ -10,6 +10,11 @@
   --signal: #ff8a80;
   --gold: #ffbe7a;
   --variant: #ff7aa2;
+  --read-reverse: rgba(255, 184, 107, 0.8);
+  --read-secondary: rgba(172, 189, 214, 0.9);
+  --read-supplementary: rgba(255, 122, 162, 0.82);
+  --read-direction-forward: #2f89c6;
+  --read-direction-reverse: #c18f2f;
   --surface-shadow: 0 14px 40px rgba(121, 146, 214, 0.14);
   --mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
   --sans: "Avenir Next", "Segoe UI", sans-serif;
@@ -28,11 +33,12 @@ body {
     radial-gradient(circle at top left, rgba(78, 168, 222, 0.18), transparent 32%),
     linear-gradient(180deg, #f7fcff 0%, #edf8ff 52%, #fff8f2 100%);
   min-height: 100vh;
+  padding-bottom: 28px;
 }
 
 .app-shell {
   width: min(1440px, calc(100vw - 32px));
-  margin: 18px auto;
+  margin: 18px auto 36px;
   padding: 22px;
   border: 1px solid rgba(125, 146, 196, 0.14);
   border-radius: 28px;
@@ -151,9 +157,14 @@ h2 {
   border: 1px solid var(--line);
   position: sticky;
   top: 12px;
-  z-index: 40;
+  z-index: 60;
   backdrop-filter: blur(10px);
   box-shadow: 0 10px 24px rgba(121, 146, 214, 0.1);
+}
+
+.controls-panel .button-row {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
 }
 
 .ingest-panel {
@@ -310,11 +321,36 @@ button:hover {
   gap: 8px;
 }
 
+.sticky-controls-card {
+  position: sticky;
+  top: 150px;
+  z-index: 50;
+  box-shadow: 0 10px 24px rgba(121, 146, 214, 0.08);
+}
+
+.sticky-controls-card .track-header {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 10px;
+}
+
+.sticky-controls-card .track-header-controls {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  row-gap: 8px;
+}
+
+.sticky-controls-card .track-meta {
+  margin-right: 6px;
+}
+
 .track-inline-button {
   min-height: 30px;
   padding: 0 10px;
   border-radius: 10px;
   font-size: 0.78rem;
+  flex: 0 0 auto;
 }
 
 .track-inline-select {
@@ -325,6 +361,8 @@ button:hover {
   background: rgba(255, 255, 255, 0.82);
   color: var(--text);
   font-size: 0.78rem;
+  flex: 0 0 auto;
+  max-width: 180px;
 }
 
 .track-inline-button:disabled {
@@ -350,6 +388,68 @@ button:hover {
 
 .track-body {
   padding: 14px 16px;
+}
+
+.read-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 0 16px 14px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  border-top: 1px solid var(--line);
+}
+
+.sticky-controls-card .read-legend {
+  padding-top: 10px;
+}
+
+.read-legend-title {
+  font-weight: 700;
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.read-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.read-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  background: rgba(96, 196, 233, 0.72);
+  border: 1px solid rgba(36, 48, 70, 0.08);
+}
+
+.read-legend-swatch.reverse {
+  background: var(--read-reverse);
+}
+
+.read-legend-swatch.secondary {
+  background: var(--read-secondary);
+}
+
+.read-legend-swatch.supplementary {
+  background: var(--read-supplementary);
+}
+
+.read-legend-swatch.low-mapq {
+  opacity: 0.45;
+}
+
+.read-legend-swatch.mismatch {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 2px rgba(36, 48, 70, 0.7);
+}
+
+.read-legend-swatch.known-variant {
+  width: 3px;
+  border-radius: 999px;
+  background: rgba(24, 28, 36, 0.7);
 }
 
 .horizontal-track,
@@ -392,43 +492,71 @@ button:hover {
   gap: 10px;
 }
 
-.annotation-row {
+.annotation-lane-shell {
+  position: relative;
   width: 100%;
-  padding: 12px;
+  min-height: 24px;
   border-radius: 14px;
   border: 1px solid rgba(93, 140, 255, 0.12);
-  background: rgba(93, 140, 255, 0.05);
-  text-align: left;
-  color: var(--text);
-}
-
-.annotation-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  font-weight: 700;
-}
-
-.annotation-meta {
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 500;
-}
-
-.annotation-bar-shell {
-  width: 100%;
-  height: 12px;
-  border-radius: 999px;
-  background: rgba(93, 140, 255, 0.08);
+  background:
+    linear-gradient(90deg, rgba(93, 140, 255, 0.03), transparent),
+    rgba(93, 140, 255, 0.04);
   overflow: hidden;
 }
 
-.annotation-bar {
-  height: 100%;
+.annotation-lane-shell.collapsed {
+  overflow: visible;
+}
+
+.annotation-chip {
+  position: absolute;
   min-width: 10px;
+  height: 16px;
+  margin: 4px 0;
+  padding: 0 8px;
+  border: none;
   border-radius: 999px;
-  background: linear-gradient(90deg, #7bb3ff, #ffb9d8);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(36, 48, 70, 0.08);
+  z-index: 1;
+}
+
+.annotation-chip:hover {
+  background: rgba(255, 255, 255, 0.96);
+  z-index: 24;
+  box-shadow: 0 4px 12px rgba(36, 48, 70, 0.18);
+}
+
+.annotation-chip.collapsed {
+  opacity: 0.92;
+}
+
+.annotation-chip-bar {
+  display: inline-block;
+  width: 6px;
+  min-width: 6px;
+  align-self: stretch;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #7bb3ff, #ffb9d8);
+}
+
+.annotation-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.annotation-limit-note {
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .read-row {
@@ -461,15 +589,15 @@ button:hover {
 }
 
 .read-overview-bar.reverse {
-  background: rgba(255, 184, 107, 0.8);
+  background: var(--read-reverse);
 }
 
 .read-overview-bar.secondary {
-  background: rgba(172, 189, 214, 0.9);
+  background: var(--read-secondary);
 }
 
 .read-overview-bar.supplementary {
-  background: rgba(255, 122, 162, 0.82);
+  background: var(--read-supplementary);
 }
 
 .read-overview-bar.low-mapq {
@@ -525,6 +653,7 @@ button:hover {
   font-weight: 700;
   color: #1b241d;
   background: rgba(93, 140, 255, 0.08);
+  overflow: visible;
 }
 
 .base-A {
@@ -554,18 +683,31 @@ button:hover {
     0 0 0 1px rgba(255, 255, 255, 0.35);
 }
 
+.base.forward {
+  background-image: linear-gradient(rgba(47, 137, 198, 0.22), rgba(47, 137, 198, 0.22));
+}
+
 .base.reverse {
-  outline: 1px solid rgba(30, 36, 31, 0.18);
+  background-image: linear-gradient(rgba(193, 143, 47, 0.28), rgba(193, 143, 47, 0.28));
 }
 
-.base.secondary {
-  background: rgba(172, 189, 214, 0.75);
-  color: #243046;
+.base.secondary::after,
+.base.supplementary::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 3px;
+  pointer-events: none;
 }
 
-.base.supplementary {
-  background: rgba(255, 122, 162, 0.75);
-  color: #ffffff;
+.base.secondary::after {
+  border: 1px dashed var(--read-secondary);
+}
+
+.base.supplementary::after {
+  inset: 0;
+  border: 2px solid var(--read-supplementary);
+  border-radius: 4px;
 }
 
 .base.low-mapq {
@@ -596,22 +738,49 @@ button:hover {
   box-shadow: 0 0 0 2px rgba(122, 16, 40, 0.45);
 }
 
-.read-direction-indicator {
+.read-status-rail {
   position: absolute;
-  top: 0;
-  width: 16px;
-  height: 8px;
-  font-family: var(--mono);
-  font-size: 0.6rem;
-  font-weight: 700;
-  color: #2f89c6;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  height: 2px;
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: 0.95;
 }
 
-.read-direction-indicator.reverse {
-  color: #c18f2f;
+.read-status-rail.top {
+  top: 6px;
+}
+
+.read-status-rail.bottom {
+  top: 29px;
+}
+
+.read-status-rail.forward {
+  background: var(--read-direction-forward);
+}
+
+.read-status-rail.reverse {
+  background: var(--read-direction-reverse);
+}
+
+.read-status-rail.secondary {
+  height: 1px;
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--read-secondary),
+    var(--read-secondary) 4px,
+    transparent 4px,
+    transparent 7px
+  );
+  background-color: transparent;
+}
+
+.read-status-rail.supplementary {
+  height: 3px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45);
+}
+
+.read-status-rail.low-mapq {
+  opacity: 0.5;
 }
 
 .read-variant-marker {
@@ -796,6 +965,10 @@ button:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .control-group.grow {
+    grid-column: 1 / -1;
+  }
+
   .ingest-panel,
   .path-grid {
     grid-template-columns: 1fr;
@@ -824,6 +997,16 @@ button:hover {
 
   .controls-panel {
     grid-template-columns: 1fr;
+  }
+
+  .control-group.compact,
+  .control-group.grow {
+    max-width: none;
+    min-width: 0;
+  }
+
+  .sticky-controls-card {
+    top: 198px;
   }
 
   .read-row {

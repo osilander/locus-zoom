@@ -63,6 +63,7 @@ For large or remote BAMs, the viewer is intentionally coverage-first:
 - coverage loads before reads
 - reads are fetched only when you click `Load Reads`
 - reads can be loaded per BAM track, so one slow BAM does not block every track
+- users can opt into `Auto Reads` when a BAM is small or fast enough
 - read fetches time out after 10 seconds so the UI does not hang indefinitely on slow storage
 
 ## Why this shape
@@ -193,8 +194,11 @@ The BAMs are synthetic long-read demos and load as three tracks by default so th
 - live local session loading by file path
 - coverage-first navigation with manual `Load Reads` for the current locus
 - per-BAM `Load Reads` so only the selected BAM needs to parse reads
+- optional `Auto Reads` mode for smaller / faster BAMs
 - 10 second timeout on read fetches for slow or remote BAM access
 - overlap-aware reuse of recent reference and exact coverage windows
+- read-state legend plus switchable read color palettes in the alignment controls
+- collapsed-by-default annotation lane with optional 20-row expanded packing
 - API optimized for local use and small windows
 - VCF `ANN` / `CSQ` parsing is shown in the selected-variant panel
 - AlphaGenome backend integration exists, but it is intentionally hidden from the UI until result rendering is complete
