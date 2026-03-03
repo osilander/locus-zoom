@@ -61,6 +61,8 @@ For large or remote BAMs, the viewer is intentionally coverage-first:
 
 - the session opens without loading read piles automatically
 - coverage loads before reads
+- coverage defaults to solid bars, with fractional base colors shown only at polymorphic sites
+- users can switch to full `Coverage: Base Mix` when they want all exact bars colored by base fraction
 - reads are fetched only when you click `Load Reads`
 - reads can be loaded per BAM track, so one slow BAM does not block every track
 - users can opt into `Auto Reads` when a BAM is small or fast enough
@@ -200,6 +202,7 @@ The BAMs are synthetic long-read demos and load as three tracks by default so th
 - overlap-aware reuse of recent reference and exact coverage windows
 - read-state legend plus switchable read color palettes in the alignment controls
 - collapsed-by-default annotation lane with optional 20-row expanded packing
+- genome-wide GFF feature lookup with autocomplete and jump-to-feature navigation
 - API optimized for local use and small windows
 - VCF `ANN` / `CSQ` parsing is shown in the selected-variant panel
 - AlphaGenome backend integration exists, but it is intentionally hidden from the UI until result rendering is complete
