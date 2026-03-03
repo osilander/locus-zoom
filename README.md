@@ -4,6 +4,8 @@ Desktop-oriented genome viewer prototype with a web UI and a lightweight local P
 
 ![Locus Zoom screenshot](images/locus-zoom-screenshot.png)
 
+You can also run Locus Zoom side-by-side for comparisons by starting two server processes on different ports (for example `8765` and `8766`) and opening both browser URLs at once.
+
 ## Quick Start
 
 For a new user, the simplest path is:
@@ -150,6 +152,25 @@ $env:HOST="127.0.0.1"; $env:PORT="8765"; py -3 server.py
 ```
 
 3. Open [http://127.0.0.1:8765](http://127.0.0.1:8765)
+
+To compare two sessions side-by-side, start a second server on another port:
+
+macOS / Linux:
+
+```bash
+PORT=8766 python3 server.py
+```
+
+Windows:
+
+```powershell
+$env:PORT="8766"; py -3 server.py
+```
+
+Then open both:
+
+- [http://127.0.0.1:8765](http://127.0.0.1:8765)
+- [http://127.0.0.1:8766](http://127.0.0.1:8766)
 
 ## Windows Notes
 
