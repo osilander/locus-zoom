@@ -379,6 +379,30 @@ button:hover {
   max-width: 180px;
 }
 
+.track-inline-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.track-inline-range input[type="range"] {
+  min-height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  width: 112px;
+}
+
 .track-inline-button:disabled {
   opacity: 0.45;
   cursor: default;
@@ -634,6 +658,25 @@ button:hover {
   background: rgba(122, 16, 40, 0.9);
 }
 
+.read-guide-line.cursor {
+  background: rgba(39, 69, 95, 0.75);
+}
+
+.mod-base-mark {
+  position: absolute;
+  top: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(193, 143, 47, 0.95);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+}
+
+.mod-base-mark.reverse {
+  background: rgba(122, 16, 40, 0.9);
+}
+
 .locus-strip {
   position: relative;
   min-height: 22px;
@@ -767,6 +810,10 @@ button:hover {
 
 .base.selected-site {
   box-shadow: 0 0 0 2px rgba(122, 16, 40, 0.45);
+}
+
+.base.cursor-site {
+  box-shadow: 0 0 0 2px rgba(39, 69, 95, 0.35);
 }
 
 .read-status-rail {

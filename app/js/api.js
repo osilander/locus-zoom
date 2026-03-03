@@ -77,3 +77,7 @@ export async function createSessionIndexes(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+export async function fetchSessionDocument(url, options = {}) {
+  return request(url, options);
+}

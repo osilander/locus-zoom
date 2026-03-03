@@ -638,6 +638,7 @@ def build_read_layout(cigar: str, start: int, sequence: str) -> tuple:
                 "base": base,
                 "op": "M",
                 "covers": True,
+                "readIndex": index,
             }
             for index, base in enumerate(sequence)
         ]
@@ -657,6 +658,7 @@ def build_read_layout(cigar: str, start: int, sequence: str) -> tuple:
                         "base": base,
                         "op": op,
                         "covers": True,
+                        "readIndex": read_index,
                     }
                 )
                 read_index += 1
@@ -709,6 +711,17 @@ def parse_optional_sam_tags(tag_fields: List[str]) -> Dict[str, object]:
         if len(parts) != 3:
             continue
         key, value_type, value = parts
+        if value_type == "B":
+            subtype, _, raw_values = value.partition(",")
+            values = []
+            if raw_values:
+                for item in raw_values.split(","):
+                    try:
+                        values.append(int(item))
+                    except ValueError:
+                        values.append(item)
+            tags[key] = values
+            continue
         if value_type == "i":
             try:
                 tags[key] = int(value)
@@ -717,6 +730,81 @@ def parse_optional_sam_tags(tag_fields: List[str]) -> Dict[str, object]:
                 pass
         tags[key] = value
     return tags
+
+
+def normalize_ml_values(raw_ml) -> List[int]:
+    if raw_ml is None:
+        return []
+    if isinstance(raw_ml, list):
+        return [int(value) for value in raw_ml]
+    try:
+        return [int(value) for value in raw_ml]
+    except TypeError:
+        return []
+
+
+def parse_modified_bases(mm_tag: object, ml_tag: object, sequence: str, layout: List[Dict]) -> List[Dict]:
+    if not mm_tag or not sequence:
+        return []
+
+    mm_text = str(mm_tag)
+    groups = [fragment for fragment in mm_text.split(";") if fragment]
+    if not groups:
+        return []
+
+    read_index_to_position = {
+        int(entry["readIndex"]): int(entry["position"])
+        for entry in layout
+        if entry.get("covers") and entry.get("readIndex") is not None
+    }
+    ml_values = normalize_ml_values(ml_tag)
+    ml_index = 0
+    modifications: List[Dict] = []
+
+    for group in groups:
+        match = re.match(r"^([A-Za-z])([+-])([A-Za-z]+)([.?])?(?:,(.*))?$", group)
+        if not match:
+            continue
+        canonical_base, strand, code, _skip_hint, delta_text = match.groups()
+        deltas = [fragment for fragment in (delta_text or "").split(",") if fragment != ""]
+        if not deltas:
+            continue
+
+        candidate_read_indexes = [
+            index
+            for index, base in enumerate(sequence)
+            if base.upper() == canonical_base.upper()
+        ]
+        occurrence_index = 0
+
+        for delta_fragment in deltas:
+            try:
+                occurrence_index += int(delta_fragment)
+            except ValueError:
+                continue
+            if occurrence_index >= len(candidate_read_indexes):
+                break
+
+            read_index = candidate_read_indexes[occurrence_index]
+            occurrence_index += 1
+            position = read_index_to_position.get(read_index)
+            likelihood = ml_values[ml_index] if ml_index < len(ml_values) else None
+            ml_index += 1
+            if position is None:
+                continue
+
+            modifications.append(
+                {
+                    "position": position,
+                    "readIndex": read_index,
+                    "canonicalBase": canonical_base.upper(),
+                    "code": code,
+                    "strand": strand,
+                    "likelihood": int(likelihood) if likelihood is not None else None,
+                }
+            )
+
+    return modifications
 
 
 def parse_sam_line(line: str) -> Dict:
@@ -736,6 +824,7 @@ def parse_sam_line(line: str) -> Dict:
     tags = parse_optional_sam_tags(fields[11:])
     layout, end = build_read_layout(cigar, pos, seq)
     read_group = tags.get("RG")
+    modifications = parse_modified_bases(tags.get("MM") or tags.get("Mm"), tags.get("ML") or tags.get("Ml"), seq, layout)
 
     return {
         "name": qname,
@@ -753,6 +842,7 @@ def parse_sam_line(line: str) -> Dict:
         "readGroup": read_group,
         "haplotype": tags.get("HP"),
         "sample": tags.get("SM") or tags.get("LB") or (f"RG:{read_group}" if read_group else None),
+        "modifiedBases": modifications,
         "reverse": bool(flag & 16),
         "secondary": bool(flag & 256),
         "supplementary": bool(flag & 2048),
@@ -768,9 +858,15 @@ def parse_aligned_segment(segment, rg_samples: Optional[Dict[str, str]] = None) 
     )
     start = int(segment.reference_start) + 1
     cigar = segment.cigarstring or "*"
-    tags = {key: value for key, value in segment.get_tags()}
+    tags = {}
+    for key, value in segment.get_tags():
+        if key in {"ML", "Ml"}:
+            tags[key] = normalize_ml_values(value)
+        else:
+            tags[key] = value
     layout, end = build_read_layout(cigar, start, sequence)
     read_group = tags.get("RG")
+    modifications = parse_modified_bases(tags.get("MM") or tags.get("Mm"), tags.get("ML") or tags.get("Ml"), sequence, layout)
     return {
         "name": segment.query_name or "(unnamed)",
         "flag": int(segment.flag),
@@ -787,6 +883,7 @@ def parse_aligned_segment(segment, rg_samples: Optional[Dict[str, str]] = None) 
         "readGroup": read_group,
         "haplotype": tags.get("HP"),
         "sample": tags.get("SM") or (rg_samples or {}).get(read_group) or tags.get("LB") or (f"RG:{read_group}" if read_group else None),
+        "modifiedBases": modifications,
         "reverse": bool(segment.is_reverse),
         "secondary": bool(segment.is_secondary),
         "supplementary": bool(segment.is_supplementary),
@@ -833,6 +930,7 @@ def compute_coverage(reads: List[Dict], start: int, end: int) -> List[Dict]:
     width = max(end - start + 1, 0)
     counts = [0] * width
     base_counts = [empty_base_counts() for _ in range(width)]
+    mod_likelihoods = [[] for _ in range(width)]
     for read in reads:
         for base in read.get("layout", []):
             if not base["covers"]:
@@ -846,11 +944,20 @@ def compute_coverage(reads: List[Dict], start: int, end: int) -> List[Dict]:
             if normalized_base not in base_counts[index]:
                 normalized_base = "N"
             base_counts[index][normalized_base] += 1
+        for mod in read.get("modifiedBases", []):
+            position = int(mod.get("position", 0))
+            if position < start or position > end:
+                continue
+            likelihood = mod.get("likelihood")
+            if likelihood is None:
+                continue
+            mod_likelihoods[position - start].append(int(likelihood))
     return [
         {
             "position": start + idx,
             "depth": depth,
             "counts": base_counts[idx],
+            "modifiedLikelihoods": mod_likelihoods[idx],
         }
         for idx, depth in enumerate(counts)
     ]
@@ -872,6 +979,7 @@ def read_depth_coverage(path: Path, contig: str, start: int, end: int) -> List[D
                     "T": counts[3][position - start] if counts and position - start < len(counts[3]) else 0,
                     "N": 0,
                 },
+                "modifiedLikelihoods": [],
             }
             for position in range(start, end + 1)
         ]
@@ -895,6 +1003,7 @@ def read_depth_coverage(path: Path, contig: str, start: int, end: int) -> List[D
             "position": position,
             "depth": depths_by_position.get(position, 0),
             "counts": empty_base_counts(),
+            "modifiedLikelihoods": [],
         }
         for position in range(start, end + 1)
     ]
@@ -1423,11 +1532,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                             end,
                             bins,
                         )
-                    elif available_backend() != "pysam":
+                    else:
                         all_reads = read_alignment_records(bam, contig, start, end)
                         coverage = compute_coverage(all_reads, start, end)
-                    else:
-                        coverage = read_depth_coverage(bam, contig, start, end)
                 else:
                     coverage = []
                 truncated = False

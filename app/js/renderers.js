@@ -43,7 +43,7 @@ function baseClass(base) {
   return `base base-${normalized}`;
 }
 
-function buildBaseCell(base, absolutePosition, { selectedVariant = null, mismatch = false, reverse = false, deleted = false, skipped = false, inserted = false, secondary = false, supplementary = false, lowMapq = false } = {}) {
+function buildBaseCell(base, absolutePosition, { selectedVariant = null, cursorPosition = null, mismatch = false, reverse = false, deleted = false, skipped = false, inserted = false, secondary = false, supplementary = false, lowMapq = false } = {}) {
   const cell = document.createElement("span");
   cell.className = `${baseClass(base)}${mismatch ? " mismatch" : ""}${reverse ? " reverse" : " forward"}`;
   if (deleted) {
@@ -66,6 +66,8 @@ function buildBaseCell(base, absolutePosition, { selectedVariant = null, mismatc
   }
   if (selectedVariant && absolutePosition === selectedVariant.position) {
     cell.classList.add("selected-site");
+  } else if (cursorPosition && absolutePosition === cursorPosition) {
+    cell.classList.add("cursor-site");
   }
   cell.title = String(absolutePosition);
   cell.textContent = inserted ? `+${(base || "").length}` : (base || "");
@@ -73,6 +75,10 @@ function buildBaseCell(base, absolutePosition, { selectedVariant = null, mismatc
 }
 
 export function renderNavigator(canvas, navigatorState, onJump) {
+  if (typeof canvas._navigatorCleanup === "function") {
+    canvas._navigatorCleanup();
+    canvas._navigatorCleanup = null;
+  }
   const ctx = canvas.getContext("2d");
   const width = Math.max(canvas.parentElement?.clientWidth || canvas.width, 320);
   const height = canvas.height;
@@ -85,49 +91,94 @@ export function renderNavigator(canvas, navigatorState, onJump) {
     ctx.font = "14px sans-serif";
     ctx.fillText("No contig loaded", 16, 28);
     canvas.onclick = null;
+    canvas.onmousedown = null;
     return;
   }
 
   const { start, end, contigLength, variants = [], selectedVariant = null } = navigatorState;
   const usableY = 40;
-  ctx.strokeStyle = "rgba(69, 86, 66, 0.22)";
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(10, usableY);
-  ctx.lineTo(width - 10, usableY);
-  ctx.stroke();
-
   const spanWidth = Math.max(width - 20, 1);
   const scale = spanWidth / contigLength;
-  const windowX = 10 + (start - 1) * scale;
-  const windowWidth = Math.max((end - start + 1) * scale, 4);
+  const windowBaseCount = Math.max(end - start + 1, 1);
 
-  ctx.fillStyle = "rgba(78, 168, 222, 0.22)";
-  ctx.fillRect(windowX, usableY - 12, windowWidth, 24);
-  ctx.strokeStyle = "#2f89c6";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(windowX, usableY - 12, windowWidth, 24);
+  const clampWindowCenter = (centerPosition) => {
+    const halfWidth = Math.floor(windowBaseCount / 2);
+    const minCenter = 1 + halfWidth;
+    const maxCenter = Math.max(minCenter, contigLength - Math.ceil(windowBaseCount / 2) + 1);
+    return Math.max(minCenter, Math.min(maxCenter, centerPosition));
+  };
 
-  variants.forEach((variant) => {
-    const x = 10 + (variant.position - 1) * scale;
-    ctx.strokeStyle = selectedVariant?.id === variant.id ? "#7a1028" : "#ff7aa2";
-    ctx.lineWidth = selectedVariant?.id === variant.id ? 2 : 1;
+  const drawNavigator = (centerPosition = null) => {
+    ctx.clearRect(0, 0, width, height);
+
+    ctx.strokeStyle = "rgba(69, 86, 66, 0.22)";
+    ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.moveTo(x, usableY - 18);
-    ctx.lineTo(x, usableY + 18);
+    ctx.moveTo(10, usableY);
+    ctx.lineTo(width - 10, usableY);
     ctx.stroke();
-  });
 
-  ctx.fillStyle = "#5f675e";
-  ctx.font = "12px sans-serif";
-  ctx.fillText("1", 10, 72);
-  ctx.fillText(String(contigLength), Math.max(width - 60, 10), 72);
+    const effectiveCenter = centerPosition == null
+      ? start + Math.floor((windowBaseCount - 1) / 2)
+      : clampWindowCenter(centerPosition);
+    const previewStart = Math.max(1, Math.min(contigLength - windowBaseCount + 1, effectiveCenter - Math.floor(windowBaseCount / 2)));
+    const windowX = 10 + (previewStart - 1) * scale;
+    const windowWidth = Math.max(windowBaseCount * scale, 4);
 
-  canvas.onclick = (event) => {
+    ctx.fillStyle = "rgba(78, 168, 222, 0.22)";
+    ctx.fillRect(windowX, usableY - 12, windowWidth, 24);
+    ctx.strokeStyle = "#2f89c6";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(windowX, usableY - 12, windowWidth, 24);
+
+    variants.forEach((variant) => {
+      const x = 10 + (variant.position - 1) * scale;
+      ctx.strokeStyle = selectedVariant?.id === variant.id ? "#7a1028" : "#ff7aa2";
+      ctx.lineWidth = selectedVariant?.id === variant.id ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, usableY - 18);
+      ctx.lineTo(x, usableY + 18);
+      ctx.stroke();
+    });
+
+    ctx.fillStyle = "#5f675e";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("1", 10, 72);
+    ctx.fillText(String(contigLength), Math.max(width - 60, 10), 72);
+  };
+
+  drawNavigator();
+
+  const positionFromEvent = (event) => {
     const rect = canvas.getBoundingClientRect();
     const x = Math.max(0, Math.min(event.clientX - rect.left - 10, spanWidth));
-    const position = Math.max(1, Math.min(contigLength, Math.round(x / scale) + 1));
-    onJump(position);
+    return Math.max(1, Math.min(contigLength, Math.round(x / scale) + 1));
+  };
+
+  canvas.onclick = null;
+
+  canvas.onmousedown = (event) => {
+    event.preventDefault();
+    let currentPosition = positionFromEvent(event);
+    drawNavigator(currentPosition);
+
+    const handleMove = (moveEvent) => {
+      currentPosition = positionFromEvent(moveEvent);
+      drawNavigator(currentPosition);
+    };
+
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("mouseleave", handleUp);
+      canvas._navigatorCleanup = null;
+      onJump(currentPosition);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("mouseleave", handleUp);
+    canvas._navigatorCleanup = handleUp;
   };
 }
 
@@ -276,9 +327,8 @@ export function renderReference(target, referenceWindow, selectedVariant) {
 
 export function renderCoverage(canvas, coverage, variants, selectedVariant, windowState, onPick, options = {}) {
   const ctx = canvas.getContext("2d");
-  const { logScale = false, baseMix = false } = options;
+  const { logScale = false, baseMix = false, modThreshold = 180, cursorPosition = null, onCursorPick = null } = options;
   const baseCount = Math.max(windowState.end - windowState.start + 1, 1);
-  const detailed = isDetailedMode(baseCount);
   const width = renderWidthFor(baseCount, containerWidthFor(canvas.parentElement));
   const height = canvas.height;
   const scale = width / baseCount;
@@ -312,7 +362,6 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     N: "#cdd6e8",
   };
   const solidBarColor = "#9fc4d8";
-  const polymorphismAccent = "#27455f";
 
   coverage.forEach((point) => {
     const barHeight = (metric(point.depth) / maxMetric) * (height - 30);
@@ -321,6 +370,9 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     const y = height - barHeight - 18;
     const barWidth = Math.max(pointWidthBases * scale - 1, 1);
     const counts = point.counts || null;
+    const modifiedLikelihoods = point.modifiedLikelihoods || [];
+    const modifiedPassingCount = modifiedLikelihoods.filter((score) => score >= modThreshold).length;
+    const modificationFraction = point.depth > 0 ? modifiedPassingCount / point.depth : 0;
 
     const hasFractionalCounts = Boolean(
       counts
@@ -336,6 +388,10 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     if (!shouldRenderFractions) {
       ctx.fillStyle = solidBarColor;
       ctx.fillRect(x, y, barWidth, barHeight);
+      if (modificationFraction > 0) {
+        ctx.fillStyle = `rgba(193, 143, 47, ${Math.max(0.14, Math.min(0.7, 0.14 + modificationFraction * 0.56))})`;
+        ctx.fillRect(x, y, barWidth, barHeight);
+      }
       if (hasFractionalCounts && point.depth > 0 && nonZeroBases.length > 1) {
         ctx.strokeStyle = "rgba(39, 69, 95, 0.55)";
         ctx.lineWidth = 1;
@@ -359,6 +415,13 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
 
   if (selectedVariant) {
     drawSelectionLine(ctx, baseCenterX(selectedVariant.position, windowState.start, scale), height);
+  } else if (cursorPosition && cursorPosition >= windowState.start && cursorPosition <= windowState.end) {
+    ctx.strokeStyle = "rgba(39, 69, 95, 0.65)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(baseCenterX(cursorPosition, windowState.start, scale), 0);
+    ctx.lineTo(baseCenterX(cursorPosition, windowState.start, scale), height);
+    ctx.stroke();
   }
 
   ctx.fillStyle = "#5f675e";
@@ -375,6 +438,7 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
   const variantByPosition = new Map((variants || []).map((variant) => [variant.position, variant]));
   const depthByPosition = new Map((coverage || []).map((point) => [point.position, point.depth]));
   const countsByPosition = new Map((coverage || []).map((point) => [point.position, point.counts || null]));
+  const modifiedByPosition = new Map((coverage || []).map((point) => [point.position, point.modifiedLikelihoods || []]));
   canvas.onmousemove = (event) => {
     const rect = canvas.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * width;
@@ -386,6 +450,8 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     const hoveredDepth = depthByPosition.get(hoveredPosition) ?? 0;
     const hoveredVariant = variantByPosition.get(hoveredPosition);
     const hoveredCounts = countsByPosition.get(hoveredPosition) || null;
+    const hoveredModifiedLikelihoods = modifiedByPosition.get(hoveredPosition) || [];
+    const hoveredModifiedCount = hoveredModifiedLikelihoods.filter((score) => score >= modThreshold).length;
     let content = `<strong>${windowState.contig || ""}${windowState.contig ? ":" : ""}${hoveredPosition}</strong><br />Depth: ${hoveredDepth}`;
     if (hoveredCounts && hoveredDepth > 0) {
       const parts = ["A", "C", "G", "T", "N"]
@@ -394,6 +460,9 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
       if (parts.length) {
         content += `<br />Bases: ${parts.join(" ")}`;
       }
+    }
+    if (hoveredModifiedCount > 0) {
+      content += `<br />Modified (ML >= ${modThreshold}): ${hoveredModifiedCount}/${hoveredDepth || 0}`;
     }
     if (hoveredVariant) {
       content += `
@@ -412,6 +481,9 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     const x = ((event.clientX - rect.left) / rect.width) * width;
     const hoveredPosition = windowState.start + Math.floor(x / scale);
     const hoveredVariant = variantByPosition.get(hoveredPosition);
+    if (onCursorPick) {
+      onCursorPick(hoveredPosition);
+    }
     if (hoveredVariant && onPick) {
       onPick(hoveredVariant);
     }
@@ -487,6 +559,8 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
   const width = renderWidthFor(windowWidth, containerWidthFor(target));
   const scale = width / windowWidth;
   const cursorPosition = options.cursorPosition ?? null;
+  const modThreshold = options.modThreshold ?? 180;
+  const onCursorPick = options.onCursorPick ?? null;
   const visibleVariants = (variants || []).filter(
     (variant) => variant.position >= referenceWindow.start && variant.position <= referenceWindow.end
   );
@@ -544,6 +618,7 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
               : false;
             const baseEl = buildBaseCell(entry.base || (entry.op === "D" ? "-" : ""), absolutePosition, {
               selectedVariant,
+              cursorPosition,
               mismatch,
               reverse: read.reverse,
               deleted: entry.op === "D",
@@ -562,7 +637,28 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
             } else {
               baseEl.title = `${read.name} ${absolutePosition} ${entry.op} MQ:${read.mapq} ${strandLabel}${cursorNote}`;
             }
+            if (onCursorPick && entry.covers) {
+              baseEl.addEventListener("click", () => onCursorPick(absolutePosition));
+            }
             segment.appendChild(baseEl);
+          });
+
+          (read.modifiedBases || []).forEach((mod) => {
+            if ((mod.likelihood ?? -1) < modThreshold) {
+              return;
+            }
+            const absolutePosition = mod.position;
+            if (absolutePosition < referenceWindow.start || absolutePosition > referenceWindow.end) {
+              return;
+            }
+            const mark = document.createElement("span");
+            mark.className = `mod-base-mark${read.reverse ? " reverse" : ""}`;
+            mark.style.left = `${(absolutePosition - referenceWindow.start) * BASE_CELL_WIDTH + 9}px`;
+            mark.title = `${read.name} modified base ${mod.canonicalBase}+${mod.code} ML:${mod.likelihood}`;
+            if (onCursorPick) {
+              mark.addEventListener("click", () => onCursorPick(absolutePosition));
+            }
+            segment.appendChild(mark);
           });
         });
 
@@ -589,6 +685,11 @@ export function renderReads(target, readGroups, referenceWindow, variants, selec
           const guide = document.createElement("div");
           guide.className = "read-guide-line";
           guide.style.left = `${baseCenterX(selectedVariant.position, referenceWindow.start, scale)}px`;
+          row.appendChild(guide);
+        } else if (cursorPosition && cursorPosition >= referenceWindow.start && cursorPosition <= referenceWindow.end) {
+          const guide = document.createElement("div");
+          guide.className = "read-guide-line cursor";
+          guide.style.left = `${baseCenterX(cursorPosition, referenceWindow.start, scale)}px`;
           row.appendChild(guide);
         }
 

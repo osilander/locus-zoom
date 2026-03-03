@@ -70,6 +70,30 @@ For large or remote BAMs, the viewer is intentionally coverage-first:
 - users can switch to full `Coverage: Base Mix` when they want all exact bars colored by base fraction
 - read fetches time out after 10 seconds so the UI does not hang indefinitely on slow storage
 - the browser remembers the last session and view across refreshes when local storage is available
+- the current view can be exported/imported as a versioned session JSON, or shared by URL
+
+## Session State
+
+Locus Zoom now keeps a versioned session document as its canonical saved state. That document captures:
+
+- the active reference, BAMs, VCF, and GFF
+- the current contig and locus window
+- track ordering and visibility settings
+- key display settings such as coloring, thresholds, grouping, and sorting
+- current selection state (for example the selected variant and active cursor position)
+
+You can use the buttons in the file intake area to:
+
+- `Export Session` to save the current state as a JSON file
+- `Import Session` to restore a previously saved JSON session
+- `Copy Share Link` to copy a URL that embeds the current session state
+
+The app also supports loading a session from the URL:
+
+- `?session=...` for an embedded encoded session
+- `?sessionUrl=...` for a session JSON hosted at a reachable URL
+
+`sessionUrl` works when the browser can fetch that JSON and the referenced genomic data is also accessible in that environment.
 
 ## Why this shape
 
@@ -223,6 +247,7 @@ The BAMs are synthetic long-read demos and load as three tracks by default so th
 - read-state legend plus switchable read color palettes in the alignment controls
 - collapsed-by-default annotation lane with optional 20-row expanded packing
 - genome-wide GFF feature lookup with autocomplete and jump-to-feature navigation
+- versioned session JSON export/import plus shareable session URLs
 - API optimized for local use and small windows
 - VCF `ANN` / `CSQ` parsing is shown in the selected-variant panel
 - AlphaGenome backend integration exists, but it is intentionally hidden from the UI until result rendering is complete

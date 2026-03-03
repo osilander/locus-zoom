@@ -1,4 +1,4 @@
-import { createSessionIndexes, fetchAlignments, fetchAnnotationSearch, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
+import { createSessionIndexes, fetchAlignments, fetchAnnotationSearch, fetchAnnotations, fetchManifest, fetchReference, fetchSessionDocument, fetchVariants, loadSession } from "./api.js";
 import { canResolveNativePaths, extractDroppedPaths, inferFileSlots } from "./desktop-bridge.js";
 import { renderAnnotations, renderCoverage, renderNavigator, renderReads, renderReference, renderSummary, renderVariantDetail, renderVariantList, renderVariants } from "./renderers.js";
 import { createStore, normalizeWindow, parseLocus } from "./state.js";
@@ -15,10 +15,12 @@ const store = createStore({
   nearbyVariants: [],
   annotations: [],
   selectedVariant: null,
+  cursorPosition: null,
   loadingReads: false,
   loadingReadTracks: [],
   autoLoadReads: false,
   readColoringEnabled: true,
+  modThreshold: 180,
   alignmentSort: "base",
   alignmentGroup: "none",
   coverageLogScale: false,
@@ -79,6 +81,10 @@ const elements = {
   gffPathInput: document.querySelector("#gff-path-input"),
   gffPathSuggestions: document.querySelector("#gff-path-suggestions"),
   loadDataButton: document.querySelector("#load-data-button"),
+  exportSessionButton: document.querySelector("#export-session-button"),
+  importSessionButton: document.querySelector("#import-session-button"),
+  shareSessionButton: document.querySelector("#share-session-button"),
+  sessionFileInput: document.querySelector("#session-file-input"),
   confirmModal: document.querySelector("#confirm-modal"),
   confirmModalTitle: document.querySelector("#confirm-modal-title"),
   confirmModalMessage: document.querySelector("#confirm-modal-message"),
@@ -107,6 +113,8 @@ const REFRESH_DEBOUNCE_MS = 90;
 const APP_STATE_STORAGE_KEY = "locus-zoom:app-state";
 const RECENT_PATHS_STORAGE_KEY = "locus-zoom:recent-paths";
 const RECENT_PATH_LIMIT = 10;
+const SESSION_SCHEMA = "locus-zoom-session";
+const SESSION_SCHEMA_VERSION = 1;
 const windowCache = {
   reference: new Map(),
   coverage: new Map(),
@@ -157,16 +165,188 @@ function applyReadColoring(enabled) {
   document.documentElement.classList.toggle("reads-color-off", !enabled);
 }
 
+function minimalVariantRef(variant) {
+  if (!variant) {
+    return null;
+  }
+  return {
+    id: variant.id || null,
+    contig: variant.contig || null,
+    position: variant.position || null,
+    ref: variant.ref || null,
+    alt: variant.alt || null,
+  };
+}
+
+function buildCanonicalSessionDocument(state = store.getState()) {
+  if (!state.session) {
+    return null;
+  }
+  return {
+    schema: SESSION_SCHEMA,
+    version: SESSION_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+    data: {
+      reference: state.session.reference || "",
+      bams: state.session.bams || (state.session.bam ? [state.session.bam] : []),
+      vcf: state.session.vcf || "",
+      gff: state.session.gff || "",
+    },
+    view: {
+      contig: state.contig || "",
+      start: Number(state.start) || 1,
+      end: Number(state.end) || 1,
+      zoomBases: Math.max(1, (Number(state.end) || 1) - (Number(state.start) || 1) + 1),
+    },
+    tracks: {
+      order: [...(state.trackOrder || [])],
+      collapsed: { ...(state.collapsedTracks || {}) },
+      coverageOnly: { ...(state.coverageOnlyTracks || {}) },
+      readFilters: { ...(state.readFilters || {}) },
+      settings: {
+        autoLoadReads: Boolean(state.autoLoadReads),
+        readColoringEnabled: Boolean(state.readColoringEnabled),
+        readColorPalette: state.readColorPalette || "default",
+        modThreshold: Number(state.modThreshold) || 180,
+        alignmentSort: state.alignmentSort || "base",
+        alignmentGroup: state.alignmentGroup || "none",
+        coverageLogScale: Boolean(state.coverageLogScale),
+        coverageBaseMix: Boolean(state.coverageBaseMix),
+        annotationExpanded: Boolean(state.annotationExpanded),
+        loadedFilesCollapsed: Boolean(state.loadedFilesCollapsed),
+      },
+    },
+    selection: {
+      selectedVariant: minimalVariantRef(state.selectedVariant),
+      selectedRead: null,
+      pinnedLocus: null,
+      cursorPosition: state.cursorPosition ?? null,
+    },
+  };
+}
+
+function migrateSessionDocument(raw) {
+  if (!raw) {
+    return null;
+  }
+  if (raw.schema === SESSION_SCHEMA && raw.version >= 1) {
+    return raw;
+  }
+  if (raw.session?.reference) {
+    return {
+      schema: SESSION_SCHEMA,
+      version: SESSION_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      data: {
+        reference: raw.session.reference || "",
+        bams: raw.session.bams || (raw.session.bam ? [raw.session.bam] : []),
+        vcf: raw.session.vcf || "",
+        gff: raw.session.gff || "",
+      },
+      view: {
+        contig: raw.contig || "",
+        start: Number(raw.start) || 1,
+        end: Number(raw.end) || 1,
+        zoomBases: Math.max(1, (Number(raw.end) || 1) - (Number(raw.start) || 1) + 1),
+      },
+      tracks: {
+        order: [...(raw.trackOrder || [])],
+        collapsed: { ...(raw.collapsedTracks || {}) },
+        coverageOnly: { ...(raw.coverageOnlyTracks || {}) },
+        readFilters: { ...(raw.readFilters || {}) },
+        settings: {
+          autoLoadReads: Boolean(raw.autoLoadReads),
+          readColoringEnabled: raw.readColoringEnabled !== false,
+          readColorPalette: raw.readColorPalette || "default",
+          modThreshold: Math.max(0, Math.min(255, Number(raw.modThreshold) || 180)),
+          alignmentSort: raw.alignmentSort || "base",
+          alignmentGroup: raw.alignmentGroup || "none",
+          coverageLogScale: Boolean(raw.coverageLogScale),
+          coverageBaseMix: Boolean(raw.coverageBaseMix),
+          annotationExpanded: Boolean(raw.annotationExpanded),
+          loadedFilesCollapsed: Boolean(raw.loadedFilesCollapsed),
+        },
+      },
+      selection: {
+        selectedVariant: minimalVariantRef(raw.selectedVariant),
+        selectedRead: null,
+        pinnedLocus: null,
+        cursorPosition: raw.cursorPosition ?? null,
+      },
+    };
+  }
+  return null;
+}
+
 function readPersistedAppState() {
   try {
     const raw = window.localStorage.getItem(APP_STATE_STORAGE_KEY);
     if (!raw) {
       return null;
     }
-    return JSON.parse(raw);
+    return migrateSessionDocument(JSON.parse(raw));
   } catch {
     return null;
   }
+}
+
+function encodeSessionForUrl(sessionDocument) {
+  const json = JSON.stringify(sessionDocument);
+  const utf8 = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_, hex) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeSessionFromUrl(encoded) {
+  const normalized = String(encoded || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  const percentEncoded = Array.from(binary)
+    .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`)
+    .join("");
+  return migrateSessionDocument(JSON.parse(decodeURIComponent(percentEncoded)));
+}
+
+function sessionFileName(sessionDocument) {
+  const contig = String(sessionDocument?.view?.contig || "session").replace(/[^a-z0-9._-]+/gi, "-");
+  return `locus-zoom-session-${contig}.json`;
+}
+
+function triggerSessionDownload(sessionDocument) {
+  const blob = new Blob([JSON.stringify(sessionDocument, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = sessionFileName(sessionDocument);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  const helper = document.createElement("textarea");
+  helper.value = text;
+  helper.setAttribute("readonly", "readonly");
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  document.body.append(helper);
+  helper.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } finally {
+    helper.remove();
+  }
+  return copied;
 }
 
 function readRecentPaths() {
@@ -309,30 +489,11 @@ function renderRecentPathSuggestions(recentPaths = readRecentPaths()) {
 
 function persistAppState(state = store.getState()) {
   try {
-    if (!state.session) {
+    const sessionDocument = buildCanonicalSessionDocument(state);
+    if (!sessionDocument) {
       return;
     }
-    const payload = {
-      session: {
-        reference: state.session.reference || "",
-        bams: state.session.bams || (state.session.bam ? [state.session.bam] : []),
-        vcf: state.session.vcf || "",
-        gff: state.session.gff || "",
-      },
-      contig: state.contig,
-      start: state.start,
-      end: state.end,
-      autoLoadReads: Boolean(state.autoLoadReads),
-      readColoringEnabled: Boolean(state.readColoringEnabled),
-      alignmentSort: state.alignmentSort,
-      alignmentGroup: state.alignmentGroup,
-      coverageLogScale: Boolean(state.coverageLogScale),
-      coverageBaseMix: Boolean(state.coverageBaseMix),
-      readColorPalette: state.readColorPalette,
-      annotationExpanded: Boolean(state.annotationExpanded),
-      loadedFilesCollapsed: Boolean(state.loadedFilesCollapsed),
-    };
-    window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(sessionDocument));
   } catch {
     // Ignore localStorage failures and continue normally.
   }
@@ -1091,6 +1252,7 @@ function renderAlignmentTracks(state) {
   sortSelect.className = "track-inline-select";
   sortSelect.innerHTML = `
     <option value="base">Sort: Base at site</option>
+    <option value="mod">Sort: Mod at site</option>
     <option value="insertSize">Sort: Insert size</option>
     <option value="strand">Sort: Strand</option>
   `;
@@ -1107,6 +1269,20 @@ function renderAlignmentTracks(state) {
   `;
   groupSelect.value = state.alignmentGroup;
   groupSelect.addEventListener("change", (event) => setAlignmentGroup(event.target.value));
+  const modThresholdWrap = document.createElement("label");
+  modThresholdWrap.className = "track-inline-range";
+  modThresholdWrap.title = "Hide modified-base calls below this ML probability threshold";
+  const modThresholdLabel = document.createElement("span");
+  modThresholdLabel.textContent = `Mod ML >= ${state.modThreshold}`;
+  const modThresholdInput = document.createElement("input");
+  modThresholdInput.type = "range";
+  modThresholdInput.min = "0";
+  modThresholdInput.max = "255";
+  modThresholdInput.step = "1";
+  modThresholdInput.value = String(state.modThreshold);
+  modThresholdInput.addEventListener("input", (event) => setModThreshold(event.target.value));
+  modThresholdWrap.appendChild(modThresholdLabel);
+  modThresholdWrap.appendChild(modThresholdInput);
   const coverageScaleButton = document.createElement("button");
   coverageScaleButton.type = "button";
   coverageScaleButton.className = "track-inline-button";
@@ -1139,6 +1315,7 @@ function renderAlignmentTracks(state) {
   bulkControls.appendChild(bulkPrimaryButton);
   bulkControls.appendChild(sortSelect);
   bulkControls.appendChild(groupSelect);
+  bulkControls.appendChild(modThresholdWrap);
   bulkControls.appendChild(coverageScaleButton);
   bulkControls.appendChild(coverageMixButton);
   bulkControls.appendChild(autoLoadButton);
@@ -1266,6 +1443,9 @@ function renderAlignmentTracks(state) {
         {
           logScale: state.coverageLogScale,
           baseMix: state.coverageBaseMix,
+          modThreshold: state.modThreshold,
+          cursorPosition: state.cursorPosition,
+          onCursorPick: handleCursorPick,
         }
       );
       if (!isCoverageOnly) {
@@ -1279,6 +1459,8 @@ function renderAlignmentTracks(state) {
             state.selectedVariant,
           {
             cursorPosition: sortCursorPosition(state),
+            modThreshold: state.modThreshold,
+            onCursorPick: handleCursorPick,
             emptyMessage: trackLoadingReads
               ? "Loading reads for this locus..."
               : !track.readsLoaded
@@ -1385,17 +1567,36 @@ function toggleReadColoring() {
   applyReadColoring(nextEnabled);
 }
 
+function setModThreshold(value) {
+  const nextThreshold = Math.max(0, Math.min(255, Number(value) || 0));
+  store.setState({
+    modThreshold: nextThreshold,
+  });
+}
+
 function setReadColorPalette(value) {
   store.setState({ readColorPalette: value });
   applyReadPalette(value);
 }
 
 function sortCursorPosition(state) {
-  return state.selectedVariant?.position ?? Math.round((state.start + state.end) / 2);
+  return state.cursorPosition ?? state.selectedVariant?.position ?? Math.round((state.start + state.end) / 2);
+}
+
+function handleCursorPick(position) {
+  const state = store.getState();
+  const nextPosition = Math.max(state.start, Math.min(state.end, Number(position) || state.start));
+  store.setState({
+    cursorPosition: nextPosition,
+  });
 }
 
 function readEntryAtPosition(read, position) {
-  return (read.layout || []).find((entry) => entry.position === position) || null;
+  const entries = (read.layout || []).filter((entry) => entry.position === position);
+  if (!entries.length) {
+    return null;
+  }
+  return entries.find((entry) => entry.covers) || entries[0];
 }
 
 function baseSortRank(read, position) {
@@ -1419,7 +1620,30 @@ function baseSortRank(read, position) {
   }[base] ?? 7;
 }
 
+function modificationSortRank(read, position, threshold) {
+  const calls = (read.modifiedBases || []).filter(
+    (mod) => mod.position === position && (mod.likelihood ?? -1) >= threshold
+  );
+  if (!calls.length) {
+    return { bucket: 1, score: -1 };
+  }
+  const score = Math.max(...calls.map((mod) => Number(mod.likelihood) || 0));
+  return { bucket: 0, score };
+}
+
 function compareReads(left, right, state) {
+  if (state.alignmentSort === "mod") {
+    const cursor = sortCursorPosition(state);
+    const leftRank = modificationSortRank(left, cursor, state.modThreshold);
+    const rightRank = modificationSortRank(right, cursor, state.modThreshold);
+    if (leftRank.bucket !== rightRank.bucket) {
+      return leftRank.bucket - rightRank.bucket;
+    }
+    if (leftRank.score !== rightRank.score) {
+      return rightRank.score - leftRank.score;
+    }
+    return 0;
+  }
   if (state.alignmentSort === "insertSize") {
     const delta = Math.abs(Number(right.insertSize) || 0) - Math.abs(Number(left.insertSize) || 0);
     if (delta !== 0) {
@@ -1436,6 +1660,7 @@ function compareReads(left, right, state) {
     if (delta !== 0) {
       return delta;
     }
+    return 0;
   }
 
   const leftStart = Number(left.start) || 0;
@@ -1734,6 +1959,7 @@ function updateWindow(nextWindow, nextContig = null, options = {}) {
     nearbyVariants: [],
     annotations: [],
     selectedVariant: null,
+    cursorPosition: null,
     loadingReads: false,
     loadingReadTracks: [],
   });
@@ -1749,6 +1975,7 @@ function handleVariantPick(variant) {
   sharedScrollLeft = 0;
   store.setState({
     selectedVariant: variant,
+    cursorPosition: variant.position,
     start: normalized.start,
     end: normalized.end,
     reference: null,
@@ -2016,6 +2243,7 @@ async function applySession(payload, message = "Loaded local files") {
       nearbyVariants: [],
       annotations: [],
       selectedVariant: null,
+      cursorPosition: null,
       loadingReads: false,
       loadingReadTracks: [],
     });
@@ -2038,41 +2266,57 @@ async function applySession(payload, message = "Loaded local files") {
   }
 }
 
-async function restorePersistedSession(savedState) {
-  const savedSession = savedState?.session;
-  if (!savedSession?.reference) {
+async function applyCanonicalSessionDocument(sessionDocument, options = {}) {
+  const document = migrateSessionDocument(sessionDocument);
+  if (!document?.data?.reference) {
     return false;
   }
-
+  const { statusMessage = "Loaded session", progress = 0.12 } = options;
   const payload = {
-    reference: savedSession.reference || "",
-    bams: savedSession.bams || [],
-    vcf: savedSession.vcf || "",
-    gff: savedSession.gff || "",
+    reference: document.data.reference || "",
+    bams: document.data.bams || [],
+    vcf: document.data.vcf || "",
+    gff: document.data.gff || "",
   };
 
-  setStatus("Restoring previous session", false, { progress: 0.12, loading: true });
+  setStatus(statusMessage, false, { progress, loading: true });
+  if (activeWindowController) {
+    activeWindowController.abort();
+    activeWindowController = null;
+  }
+  if (activeReadsController) {
+    activeReadsController.abort();
+    activeReadsController = null;
+    clearActiveReadsTimeout();
+  }
+  clearWindowCaches();
   const session = await loadSession(payload);
   if (!session.contigs || session.contigs.length === 0) {
-    throw new Error("Saved session could not be restored.");
+    throw new Error("Session could not be restored.");
   }
 
   updateContigOptions(session);
   setSessionInputs(session);
   updateRecentPathsFromSession(session);
+  renderRecentPathSuggestions();
 
-  const savedContig = session.contigs.find((contig) => contig.name === savedState.contig) || session.contigs[0];
+  const settings = document.tracks?.settings || {};
+  const savedContig = session.contigs.find((contig) => contig.name === document.view?.contig) || session.contigs[0];
   const defaultEnd = Math.min(savedContig.length, DEFAULT_CONTIG_WINDOW_BASES);
   const normalized = normalizeWindow(
     savedContig.length,
-    Number(savedState.start) || 1,
-    Number(savedState.end) || defaultEnd
+    Number(document.view?.start) || 1,
+    Number(document.view?.end) || defaultEnd
   );
-  const palette = READ_COLOR_PALETTES[savedState.readColorPalette] ? savedState.readColorPalette : "default";
+  const palette = READ_COLOR_PALETTES[settings.readColorPalette] ? settings.readColorPalette : "default";
+  const selectedVariantRef = document.selection?.selectedVariant || null;
+  const cursorPosition = document.selection?.cursorPosition ?? selectedVariantRef?.position ?? null;
+  const readColoringEnabled = settings.readColoringEnabled !== false;
 
   sharedScrollLeft = 0;
   pendingCenterPosition = null;
   applyReadPalette(palette);
+  applyReadColoring(readColoringEnabled);
   store.setState({
     session,
     contig: savedContig.name,
@@ -2084,23 +2328,126 @@ async function restorePersistedSession(savedState) {
     variants: [],
     nearbyVariants: [],
     annotations: [],
-    selectedVariant: null,
+    selectedVariant: selectedVariantRef,
+    cursorPosition: cursorPosition,
     loadingReads: false,
     loadingReadTracks: [],
-    autoLoadReads: Boolean(savedState.autoLoadReads),
-    readColoringEnabled: savedState.readColoringEnabled !== false,
-    alignmentSort: savedState.alignmentSort || "base",
-    alignmentGroup: savedState.alignmentGroup || "none",
-    coverageLogScale: Boolean(savedState.coverageLogScale),
-    coverageBaseMix: Boolean(savedState.coverageBaseMix),
+    autoLoadReads: Boolean(settings.autoLoadReads),
+    readColoringEnabled,
+    modThreshold: Math.max(0, Math.min(255, Number(settings.modThreshold) || 180)),
+    alignmentSort: settings.alignmentSort || "base",
+    alignmentGroup: settings.alignmentGroup || "none",
+    coverageLogScale: Boolean(settings.coverageLogScale),
+    coverageBaseMix: Boolean(settings.coverageBaseMix),
     readColorPalette: palette,
-    annotationExpanded: Boolean(savedState.annotationExpanded),
-    loadedFilesCollapsed: Boolean(savedState.loadedFilesCollapsed),
+    annotationExpanded: Boolean(settings.annotationExpanded),
+    loadedFilesCollapsed: Boolean(settings.loadedFilesCollapsed),
+    trackOrder: [...(document.tracks?.order || [])],
+    collapsedTracks: { ...(document.tracks?.collapsed || {}) },
+    coverageOnlyTracks: { ...(document.tracks?.coverageOnly || {}) },
+    readFilters: {
+      ...store.getState().readFilters,
+      ...(document.tracks?.readFilters || {}),
+    },
   });
-  applyReadColoring(savedState.readColoringEnabled !== false);
-  setStatus("Restored previous session", false, { progress: 0.35, loading: true });
+  setStatus(statusMessage, false, { progress: 0.35, loading: true });
   await refreshWindow();
   return true;
+}
+
+async function downloadCurrentSession() {
+  const sessionDocument = buildCanonicalSessionDocument();
+  if (!sessionDocument) {
+    setStatus("No active session to export", true);
+    return;
+  }
+  triggerSessionDownload(sessionDocument);
+  setStatus("Exported session JSON");
+}
+
+async function importSessionDocumentFromFile(file) {
+  if (!file) {
+    return;
+  }
+  const text = await file.text();
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("Session file is not valid JSON.");
+  }
+  const sessionDocument = migrateSessionDocument(raw);
+  if (!sessionDocument) {
+    throw new Error("Session file is not a supported Locus Zoom session.");
+  }
+  await applyCanonicalSessionDocument(sessionDocument, {
+    statusMessage: "Importing session",
+    progress: 0.12,
+  });
+}
+
+async function copyShareSessionLink() {
+  const sessionDocument = buildCanonicalSessionDocument();
+  if (!sessionDocument) {
+    setStatus("No active session to share", true);
+    return;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.delete("sessionUrl");
+  url.searchParams.set("session", encodeSessionForUrl(sessionDocument));
+  const shareLink = url.toString();
+  try {
+    const copied = await copyTextToClipboard(shareLink);
+    if (copied) {
+      setStatus("Copied share link");
+      return;
+    }
+  } catch {
+    // Fall back to a prompt if clipboard access is not available.
+  }
+  window.prompt("Copy this share link", shareLink);
+  setStatus("Share link ready to copy");
+}
+
+async function tryLoadSessionFromUrlParams() {
+  const params = new URLSearchParams(window.location.search);
+  const embedded = params.get("session");
+  if (embedded) {
+    const sessionDocument = decodeSessionFromUrl(embedded);
+    if (!sessionDocument) {
+      throw new Error("Shared session link is invalid or unsupported.");
+    }
+    await applyCanonicalSessionDocument(sessionDocument, {
+      statusMessage: "Loading shared session",
+      progress: 0.08,
+    });
+    return true;
+  }
+
+  const sessionUrl = params.get("sessionUrl");
+  if (!sessionUrl) {
+    return false;
+  }
+
+  setStatus("Loading session from URL", false, { progress: 0.08, loading: true });
+  const resolvedUrl = new URL(sessionUrl, window.location.href).toString();
+  const remoteDocument = await fetchSessionDocument(resolvedUrl);
+  const sessionDocument = migrateSessionDocument(remoteDocument);
+  if (!sessionDocument) {
+    throw new Error("Remote session JSON is invalid or unsupported.");
+  }
+  await applyCanonicalSessionDocument(sessionDocument, {
+    statusMessage: "Loaded shared session",
+    progress: 0.18,
+  });
+  return true;
+}
+
+async function restorePersistedSession(sessionDocument) {
+  return applyCanonicalSessionDocument(sessionDocument, {
+    statusMessage: "Restoring previous session",
+    progress: 0.12,
+  });
 }
 
 function maxSharedScrollLeft() {
@@ -2269,6 +2616,31 @@ function attachEvents() {
     await applySession(buildSessionPayload());
   });
 
+  elements.exportSessionButton.addEventListener("click", () => {
+    void downloadCurrentSession();
+  });
+
+  elements.importSessionButton.addEventListener("click", () => {
+    elements.sessionFileInput.click();
+  });
+
+  elements.shareSessionButton.addEventListener("click", () => {
+    void copyShareSessionLink();
+  });
+
+  elements.sessionFileInput.addEventListener("change", async (event) => {
+    const [file] = event.target.files || [];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      await importSessionDocumentFromFile(file);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+
   elements.bamPathInput.addEventListener("input", () => {
     renderRecentPathSuggestions();
   });
@@ -2369,6 +2741,12 @@ async function initialize() {
     applyReadPalette(store.getState().readColorPalette);
     applyReadColoring(store.getState().readColoringEnabled);
     renderRecentPathSuggestions();
+
+     const loadedFromUrl = await tryLoadSessionFromUrlParams();
+     if (loadedFromUrl) {
+       return;
+     }
+
     const savedState = readPersistedAppState();
     if (savedState) {
       try {
@@ -2403,6 +2781,7 @@ async function initialize() {
       nearbyVariants: [],
       annotations: [],
       selectedVariant: null,
+      cursorPosition: null,
       loadingReads: false,
       loadingReadTracks: [],
     });
