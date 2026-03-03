@@ -1588,7 +1588,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            if target.suffix in {".html", ".css", ".js"}:
+            if target.suffix in {".html", ".css", ".js", ".svg"}:
                 self.send_header("Cache-Control", "no-store, max-age=0")
             self.end_headers()
             self.wfile.write(target.read_bytes())
@@ -1601,6 +1601,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             ".css": "text/css; charset=utf-8",
             ".js": "application/javascript; charset=utf-8",
             ".json": "application/json; charset=utf-8",
+            ".svg": "image/svg+xml",
         }.get(suffix, "application/octet-stream")
 
     def write_json(self, payload: Dict, status: int = 200):
