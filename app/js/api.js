@@ -53,6 +53,11 @@ export async function fetchAnnotations(contig, start, end, options = {}) {
   return request(`/api/annotations?contig=${encodeURIComponent(contig)}&start=${start}&end=${end}`, options);
 }
 
+export async function fetchAnnotationSearch(query, options = {}) {
+  const limit = options.limit ? `&limit=${options.limit}` : "";
+  return request(`/api/annotations/search?q=${encodeURIComponent(query)}${limit}`, options);
+}
+
 export async function loadSession(payload) {
   return request("/api/session/load", {
     method: "POST",

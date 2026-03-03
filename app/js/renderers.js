@@ -276,7 +276,7 @@ export function renderReference(target, referenceWindow, selectedVariant) {
 
 export function renderCoverage(canvas, coverage, variants, selectedVariant, windowState, onPick, options = {}) {
   const ctx = canvas.getContext("2d");
-  const { logScale = false } = options;
+  const { logScale = false, baseMix = false } = options;
   const baseCount = Math.max(windowState.end - windowState.start + 1, 1);
   const detailed = isDetailedMode(baseCount);
   const width = renderWidthFor(baseCount, containerWidthFor(canvas.parentElement));
@@ -311,6 +311,8 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     T: "#ffbfde",
     N: "#cdd6e8",
   };
+  const solidBarColor = "#60c4e9";
+  const polymorphismAccent = "#27455f";
 
   coverage.forEach((point) => {
     const barHeight = (metric(point.depth) / maxMetric) * (height - 30);
@@ -326,9 +328,19 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
       && ["A", "C", "G", "T", "N"].some((base) => (counts[base] || 0) > 0)
     );
 
-    if (!hasFractionalCounts) {
-      ctx.fillStyle = "#60c4e9";
+    const nonZeroBases = hasFractionalCounts
+      ? ["A", "C", "G", "T", "N"].filter((base) => (counts[base] || 0) > 0)
+      : [];
+    const shouldRenderFractions = hasFractionalCounts && (baseMix || nonZeroBases.length > 1);
+
+    if (!shouldRenderFractions) {
+      ctx.fillStyle = solidBarColor;
       ctx.fillRect(x, y, barWidth, barHeight);
+      if (hasFractionalCounts && point.depth > 0 && nonZeroBases.length > 1) {
+        ctx.strokeStyle = "rgba(39, 69, 95, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(barWidth - 1, 0), Math.max(barHeight - 1, 0));
+      }
       return;
     }
 
@@ -428,15 +440,10 @@ export function renderVariants(canvas, variants, windowState, selectedVariant, o
     const x = baseCenterX(variant.position, windowState.start, scale);
     const active = selectedVariant && selectedVariant.id === variant.id;
     ctx.fillStyle = active ? "#7a1028" : "#c18f2f";
-    ctx.beginPath();
-    ctx.moveTo(x, 12);
-    ctx.lineTo(x + 8, height / 2);
-    ctx.lineTo(x - 8, height / 2);
-    ctx.closePath();
-    ctx.fill();
+    ctx.fillRect(x - 5, 12, 10, height / 2 - 12);
     hotspots.push({
-      x0: x - 10,
-      x1: x + 10,
+      x0: x - 8,
+      x1: x + 8,
       variant,
     });
   });

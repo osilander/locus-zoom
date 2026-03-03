@@ -65,6 +65,7 @@ For large or remote BAMs, the viewer is intentionally coverage-first:
 - reads can be loaded per BAM track, so one slow BAM does not block every track
 - users can opt into `Auto Reads` when a BAM is small or fast enough
 - read fetches time out after 10 seconds so the UI does not hang indefinitely on slow storage
+- the browser remembers the last session and view across refreshes when local storage is available
 
 ## Why this shape
 

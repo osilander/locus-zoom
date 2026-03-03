@@ -27,7 +27,7 @@
       <section class="ingest-panel">
         <div class="drop-zone" id="drop-zone">
           <p class="drop-title">Desktop File Intake</p>
-          <p class="drop-copy">Drop a FASTA, one or more BAM/CRAM files, plus optional VCF and GFF files here. In a desktop shell, dropped files can populate native paths directly.</p>
+          <p class="drop-copy">Drop a FASTA, one or more BAM/CRAM files, plus optional VCF and GFF files here. If drag and drop does not work in your browser, paste the file paths into the fields instead.</p>
         </div>
         <div class="path-grid">
           <div class="control-group">
@@ -69,15 +69,20 @@
           <label for="locus-input">Locus</label>
           <input id="locus-input" type="text" placeholder="chrDemo:1-120" />
         </div>
+        <div class="control-group grow">
+          <label for="feature-search-input">GFF Feature</label>
+          <input id="feature-search-input" type="text" list="annotation-suggestions" placeholder="Type a visible feature label" />
+          <datalist id="annotation-suggestions"></datalist>
+        </div>
         <div class="button-row">
-          <button id="go-button" title="Go to locus (Enter)">Go</button>
-          <button id="prev-button" title="Previous window (Shift+ArrowLeft)">Prev</button>
-          <button id="next-button" title="Next window (Shift+ArrowRight)">Next</button>
-          <button id="prev-variant-button" title="Previous variant ([)">Prev Variant</button>
-          <button id="next-variant-button" title="Next variant (])">Next Variant</button>
-          <button id="home-button" title="Full contig view (H)">Home</button>
-          <button id="zoom-in-button" title="Zoom in (+ or =)">Zoom In</button>
-          <button id="zoom-out-button" title="Zoom out (-)">Zoom Out</button>
+          <button id="go-button" title="Go to location (Enter)">Go To</button>
+          <button id="prev-button" title="Previous window (Shift+ArrowLeft)">&#8592; Prev</button>
+          <button id="next-button" title="Next window (Shift+ArrowRight)">Next &#8594;</button>
+          <button id="prev-variant-button" title="Previous variant ([)">&#8592; Variant</button>
+          <button id="next-variant-button" title="Next variant (])">Variant &#8594;</button>
+          <button id="home-button" title="Full contig view (H)">&#8962; Home</button>
+          <button id="zoom-in-button" title="Zoom in (+ or =)">+ Zoom In</button>
+          <button id="zoom-out-button" title="Zoom out (-)">- Zoom Out</button>
         </div>
       </section>
 
@@ -127,7 +132,10 @@
 
         <aside class="sidebar">
           <section class="sidebar-card">
-            <h2>Loaded Files</h2>
+            <div class="sidebar-card-header">
+              <h2>Loaded Files</h2>
+              <button id="loaded-files-toggle-button" type="button" class="track-inline-button">Collapse</button>
+            </div>
             <div id="session-detail" class="detail-card muted">Using demo session.</div>
           </section>
 

@@ -815,6 +815,18 @@ button:hover {
   padding: 16px;
 }
 
+.sidebar-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.sidebar-card-header h2 {
+  margin-bottom: 0;
+}
+
 .summary-list {
   margin: 0;
   display: grid;
@@ -872,6 +884,69 @@ button:hover {
   border-radius: 14px;
   background: rgba(93, 140, 255, 0.05);
   border: 1px solid rgba(93, 140, 255, 0.12);
+}
+
+.session-meta-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(93, 140, 255, 0.12);
+}
+
+.session-meta-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.session-meta-value {
+  font-weight: 700;
+}
+
+.session-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(93, 140, 255, 0.08);
+}
+
+.session-file-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.session-file-info {
+  min-width: 0;
+}
+
+.session-file-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.session-file-path {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.session-file-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .variant-detail-section {

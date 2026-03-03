@@ -1,4 +1,4 @@
-import { createSessionIndexes, fetchAlignments, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
+import { createSessionIndexes, fetchAlignments, fetchAnnotationSearch, fetchAnnotations, fetchManifest, fetchReference, fetchVariants, loadSession } from "./api.js";
 import { canResolveNativePaths, extractDroppedPaths, inferFileSlots } from "./desktop-bridge.js";
 import { renderAnnotations, renderCoverage, renderNavigator, renderReads, renderReference, renderSummary, renderVariantDetail, renderVariantList, renderVariants } from "./renderers.js";
 import { createStore, normalizeWindow, parseLocus } from "./state.js";
@@ -21,8 +21,10 @@ const store = createStore({
   alignmentSort: "base",
   alignmentGroup: "none",
   coverageLogScale: false,
+  coverageBaseMix: false,
   readColorPalette: "default",
   annotationExpanded: false,
+  loadedFilesCollapsed: false,
   readFilters: {
     hideSecondary: false,
     hideSupplementary: false,
@@ -43,6 +45,8 @@ const elements = {
   startInput: document.querySelector("#start-input"),
   endInput: document.querySelector("#end-input"),
   locusInput: document.querySelector("#locus-input"),
+  featureSearchInput: document.querySelector("#feature-search-input"),
+  annotationSuggestions: document.querySelector("#annotation-suggestions"),
   goButton: document.querySelector("#go-button"),
   prevButton: document.querySelector("#prev-button"),
   nextButton: document.querySelector("#next-button"),
@@ -63,6 +67,7 @@ const elements = {
   variantDetail: document.querySelector("#variant-detail"),
   summaryList: document.querySelector("#summary-list"),
   sessionDetail: document.querySelector("#session-detail"),
+  loadedFilesToggleButton: document.querySelector("#loaded-files-toggle-button"),
   dropZone: document.querySelector("#drop-zone"),
   referencePathInput: document.querySelector("#reference-path-input"),
   bamPathInput: document.querySelector("#bam-path-input"),
@@ -84,6 +89,8 @@ let activeReadsController = null;
 let activeReadsTimeoutId = null;
 let scheduledRefreshTimer = null;
 let pendingCenterPosition = null;
+let annotationSuggestTimer = null;
+let annotationSuggestToken = 0;
 const REFERENCE_SEQUENCE_MAX_BASES = 5000;
 const COVERAGE_BIN_THRESHOLD = 5000;
 const COVERAGE_BIN_COUNT = 900;
@@ -92,6 +99,7 @@ const READ_FETCH_TIMEOUT_MS = 10000;
 const DEFAULT_CONTIG_WINDOW_BASES = 100000;
 const WINDOW_CACHE_LIMIT = 18;
 const REFRESH_DEBOUNCE_MS = 90;
+const APP_STATE_STORAGE_KEY = "locus-zoom:app-state";
 const windowCache = {
   reference: new Map(),
   coverage: new Map(),
@@ -138,6 +146,48 @@ function applyReadPalette(paletteName) {
   root.style.setProperty("--read-direction-reverse", palette.directionReverse);
 }
 
+function readPersistedAppState() {
+  try {
+    const raw = window.localStorage.getItem(APP_STATE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function persistAppState(state = store.getState()) {
+  try {
+    if (!state.session) {
+      return;
+    }
+    const payload = {
+      session: {
+        reference: state.session.reference || "",
+        bams: state.session.bams || (state.session.bam ? [state.session.bam] : []),
+        vcf: state.session.vcf || "",
+        gff: state.session.gff || "",
+      },
+      contig: state.contig,
+      start: state.start,
+      end: state.end,
+      autoLoadReads: Boolean(state.autoLoadReads),
+      alignmentSort: state.alignmentSort,
+      alignmentGroup: state.alignmentGroup,
+      coverageLogScale: Boolean(state.coverageLogScale),
+      coverageBaseMix: Boolean(state.coverageBaseMix),
+      readColorPalette: state.readColorPalette,
+      annotationExpanded: Boolean(state.annotationExpanded),
+      loadedFilesCollapsed: Boolean(state.loadedFilesCollapsed),
+    };
+    window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore localStorage failures and continue normally.
+  }
+}
+
 function minWindowBasesForZoom() {
   return 12;
 }
@@ -147,14 +197,15 @@ function currentViewportMetrics(state = store.getState()) {
   const scrollWidth = anchor?.scrollWidth || 0;
   const clientWidth = anchor?.clientWidth || 0;
   const windowWidth = Math.max(state.end - state.start + 1, 1);
-  const normalizedCenter = scrollWidth > 0
-    ? Math.max(0, Math.min(1, (sharedScrollLeft + clientWidth / 2) / scrollWidth))
-    : 0.5;
+  const pixelsPerBase = scrollWidth > 0 ? scrollWidth / windowWidth : 0;
+  const centerOffsetBases = pixelsPerBase > 0
+    ? (sharedScrollLeft + clientWidth / 2) / pixelsPerBase
+    : windowWidth / 2;
   const centerBase = Math.max(
     state.start,
     Math.min(
       state.end,
-      state.start + Math.round(normalizedCenter * Math.max(windowWidth - 1, 0))
+      state.start + Math.round(centerOffsetBases - 0.5)
     )
   );
   return {
@@ -182,12 +233,10 @@ function applyPendingViewportCenter(state = store.getState()) {
     return;
   }
 
-  const relative = Math.max(
-    0,
-    Math.min(1, ((pendingCenterPosition - state.start) + 0.5) / baseCount)
-  );
+  const pixelsPerBase = scrollWidth / baseCount;
+  const targetCenterX = ((pendingCenterPosition - state.start) + 0.5) * pixelsPerBase;
   pendingCenterPosition = null;
-  sharedScrollLeft = Math.max(0, Math.min(scrollWidth - clientWidth, relative * scrollWidth - clientWidth / 2));
+  sharedScrollLeft = Math.max(0, Math.min(scrollWidth - clientWidth, targetCenterX - clientWidth / 2));
   applySharedScroll();
 }
 
@@ -430,29 +479,187 @@ function syncControls(state) {
   if (elements.annotationToggleButton) {
     elements.annotationToggleButton.textContent = state.annotationExpanded ? "Collapse" : "Expand";
   }
+  if (elements.loadedFilesToggleButton) {
+    elements.loadedFilesToggleButton.textContent = state.loadedFilesCollapsed ? "Expand" : "Collapse";
+  }
   if (elements.annotationTrackMeta) {
     elements.annotationTrackMeta.textContent = state.annotationExpanded
       ? "Expanded annotation lanes (capped at 20 rows)"
       : "Collapsed annotation lane (hover for detail)";
   }
+  syncAnnotationSuggestions();
+}
+
+function syncAnnotationSuggestions() {
+  if (!elements.annotationSuggestions) {
+    return;
+  }
+  if (elements.featureSearchInput && !elements.featureSearchInput.value.trim()) {
+    elements.featureSearchInput.placeholder = "Search all loaded GFF features";
+  }
+}
+
+function setAnnotationSuggestions(matches) {
+  if (!elements.annotationSuggestions) {
+    return;
+  }
+  const labels = [...new Set(
+    (matches || [])
+      .map((feature) => (feature?.label || "").trim())
+      .filter(Boolean)
+  )];
+  elements.annotationSuggestions.replaceChildren(
+    ...labels.map((label) => {
+      const option = document.createElement("option");
+      option.value = label;
+      return option;
+    })
+  );
+}
+
+function queueAnnotationSuggestions(query) {
+  if (!elements.featureSearchInput) {
+    return;
+  }
+  if (annotationSuggestTimer) {
+    window.clearTimeout(annotationSuggestTimer);
+    annotationSuggestTimer = null;
+  }
+
+  const searchText = String(query || "").trim();
+  const nextToken = annotationSuggestToken + 1;
+  annotationSuggestToken = nextToken;
+
+  if (!searchText) {
+    setAnnotationSuggestions([]);
+    return;
+  }
+
+  annotationSuggestTimer = window.setTimeout(async () => {
+    try {
+      const payload = await fetchAnnotationSearch(searchText, { limit: 20 });
+      if (nextToken !== annotationSuggestToken) {
+        return;
+      }
+      setAnnotationSuggestions(payload.matches || []);
+    } catch {
+      if (nextToken !== annotationSuggestToken) {
+        return;
+      }
+      setAnnotationSuggestions([]);
+    }
+  }, 120);
 }
 
 function renderSessionDetail(session) {
+  elements.sessionDetail.hidden = Boolean(store.getState().loadedFilesCollapsed);
   if (!session) {
     elements.sessionDetail.textContent = "No active session.";
     return;
   }
-  const formatPath = (label, path) => `${label}: ${path || "not loaded"}`;
   elements.sessionDetail.classList.remove("muted");
-  elements.sessionDetail.innerHTML = [
-    formatPath("Reference", session.reference),
-    formatPath(
-      "BAMs",
-      (session.bams || []).length ? (session.bams || []).join("<br />") : "not loaded"
-    ),
-    formatPath("VCF", session.vcf),
-    formatPath("GFF", session.gff),
-  ].join("<br />");
+  elements.sessionDetail.replaceChildren();
+
+  const state = store.getState();
+  const activeBams = session.bams || (session.bam ? [session.bam] : []);
+
+  const addMetaRow = (label, value) => {
+    const row = document.createElement("div");
+    row.className = "session-meta-row";
+
+    const rowLabel = document.createElement("span");
+    rowLabel.className = "session-meta-label";
+    rowLabel.textContent = label;
+
+    const rowValue = document.createElement("span");
+    rowValue.className = "session-meta-value";
+    rowValue.textContent = value;
+
+    row.appendChild(rowLabel);
+    row.appendChild(rowValue);
+    elements.sessionDetail.appendChild(row);
+  };
+
+  const copyTextToClipboard = async (text) => {
+    if (!text) {
+      setStatus("No active file path to copy", true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus("Copied file path");
+    } catch {
+      setStatus("Clipboard copy is not available in this browser", true);
+    }
+  };
+
+  const unloadOptionalFile = async (kind) => {
+    if (kind === "vcf") {
+      elements.vcfPathInput.value = "";
+    } else if (kind === "gff") {
+      elements.gffPathInput.value = "";
+    } else {
+      return;
+    }
+    await applySession(buildSessionPayload(), `Unloaded ${kind.toUpperCase()}`);
+  };
+
+  const addFileRow = ({ label, path, canUnload = false, unloadKind = "" }) => {
+    const row = document.createElement("div");
+    row.className = "session-file-row";
+
+    const info = document.createElement("div");
+    info.className = "session-file-info";
+
+    const rowLabel = document.createElement("div");
+    rowLabel.className = "session-file-label";
+    rowLabel.textContent = label;
+
+    const rowPath = document.createElement("div");
+    rowPath.className = "session-file-path";
+    rowPath.textContent = path || "not loaded";
+
+    info.appendChild(rowLabel);
+    info.appendChild(rowPath);
+
+    const actions = document.createElement("div");
+    actions.className = "session-file-actions";
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "track-inline-button";
+    copyButton.textContent = "⧉ Copy";
+    copyButton.title = path ? `Copy ${label} path` : `No ${label} path to copy`;
+    copyButton.disabled = !path;
+    copyButton.addEventListener("click", () => {
+      void copyTextToClipboard(path);
+    });
+    actions.appendChild(copyButton);
+
+    if (canUnload && path) {
+      const unloadButton = document.createElement("button");
+      unloadButton.type = "button";
+      unloadButton.className = "track-inline-button";
+      unloadButton.textContent = `✕ Unload ${label}`;
+      unloadButton.title = `Unload ${label}`;
+      unloadButton.addEventListener("click", () => {
+        void unloadOptionalFile(unloadKind);
+      });
+      actions.appendChild(unloadButton);
+    }
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    elements.sessionDetail.appendChild(row);
+  };
+
+  addMetaRow("Read mode", state.autoLoadReads ? "Auto" : "Manual");
+  addFileRow({ label: "Reference", path: session.reference });
+  activeBams.forEach((path, index) => {
+    addFileRow({ label: activeBams.length > 1 ? `BAM ${index + 1}` : "BAM", path });
+  });
+  addFileRow({ label: "VCF", path: session.vcf, canUnload: true, unloadKind: "vcf" });
+  addFileRow({ label: "GFF", path: session.gff, canUnload: true, unloadKind: "gff" });
 }
 
 async function refreshWindow() {
@@ -755,6 +962,11 @@ function renderAlignmentTracks(state) {
   coverageScaleButton.className = "track-inline-button";
   coverageScaleButton.textContent = state.coverageLogScale ? "Coverage: Log" : "Coverage: Linear";
   coverageScaleButton.addEventListener("click", toggleCoverageScale);
+  const coverageMixButton = document.createElement("button");
+  coverageMixButton.type = "button";
+  coverageMixButton.className = "track-inline-button";
+  coverageMixButton.textContent = state.coverageBaseMix ? "Coverage: Base Mix" : "Coverage: Solid";
+  coverageMixButton.addEventListener("click", toggleCoverageBaseMix);
   const autoLoadButton = document.createElement("button");
   autoLoadButton.type = "button";
   autoLoadButton.className = "track-inline-button";
@@ -773,6 +985,7 @@ function renderAlignmentTracks(state) {
   bulkControls.appendChild(sortSelect);
   bulkControls.appendChild(groupSelect);
   bulkControls.appendChild(coverageScaleButton);
+  bulkControls.appendChild(coverageMixButton);
   bulkControls.appendChild(autoLoadButton);
   bulkControls.appendChild(paletteSelect);
   bulkControls.appendChild(filterSecondaryButton);
@@ -839,14 +1052,16 @@ function renderAlignmentTracks(state) {
     const upButton = document.createElement("button");
     upButton.type = "button";
     upButton.className = "track-inline-button";
-    upButton.textContent = "Up";
+    upButton.textContent = "↑";
+    upButton.title = "Move track up";
     upButton.disabled = index === 0;
     upButton.addEventListener("click", () => moveTrack(track.path, -1));
 
     const downButton = document.createElement("button");
     downButton.type = "button";
     downButton.className = "track-inline-button";
-    downButton.textContent = "Down";
+    downButton.textContent = "↓";
+    downButton.title = "Move track down";
     downButton.disabled = index === tracks.length - 1;
     downButton.addEventListener("click", () => moveTrack(track.path, 1));
 
@@ -894,6 +1109,7 @@ function renderAlignmentTracks(state) {
         handleVariantPick,
         {
           logScale: state.coverageLogScale,
+          baseMix: state.coverageBaseMix,
         }
       );
       if (!isCoverageOnly) {
@@ -987,6 +1203,13 @@ function toggleCoverageScale() {
   const state = store.getState();
   store.setState({
     coverageLogScale: !state.coverageLogScale,
+  });
+}
+
+function toggleCoverageBaseMix() {
+  const state = store.getState();
+  store.setState({
+    coverageBaseMix: !state.coverageBaseMix,
   });
 }
 
@@ -1380,10 +1603,76 @@ function handleAnnotationPick(feature) {
   });
 }
 
+function updateLocusInputFromCoordinateFields() {
+  const contig = elements.contigSelect.value;
+  const start = Math.trunc(Number(elements.startInput.value));
+  const end = Math.trunc(Number(elements.endInput.value));
+  if (!contig || !Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < 1) {
+    return;
+  }
+  elements.locusInput.value = `${contig}:${start}-${end}`;
+}
+
+function commitNavigationInputs() {
+  const contig = elements.contigSelect.value;
+  const start = Math.trunc(Number(elements.startInput.value));
+  const end = Math.trunc(Number(elements.endInput.value));
+  const typedLocus = elements.locusInput.value.trim();
+  const coordinateLocus = (
+    contig && Number.isFinite(start) && Number.isFinite(end) && start >= 1 && end >= 1
+  ) ? `${contig}:${start}-${end}` : "";
+
+  if (typedLocus && coordinateLocus && typedLocus !== coordinateLocus) {
+    const parsed = parseLocus(typedLocus);
+    updateWindow({ start: parsed.start, end: parsed.end }, parsed.contig);
+    return;
+  }
+
+  if (coordinateLocus) {
+    updateWindow({ start, end }, contig);
+    return;
+  }
+
+  const parsed = parseLocus(typedLocus);
+  updateWindow({ start: parsed.start, end: parsed.end }, parsed.contig);
+}
+
+async function jumpToAnnotationSearch() {
+  const query = (elements.featureSearchInput?.value || "").trim().toLowerCase();
+  if (!query) {
+    setStatus("Enter a GFF feature label");
+    return;
+  }
+  let matches = [];
+  try {
+    const payload = await fetchAnnotationSearch(query, { limit: 20 });
+    matches = payload.matches || [];
+    setAnnotationSuggestions(matches);
+  } catch (error) {
+    setStatus(error.message, true);
+    return;
+  }
+  const exactMatch = matches.find((feature) => (feature.label || "").trim().toLowerCase() === query);
+  const partialMatch = matches[0] || null;
+  const match = exactMatch || partialMatch;
+  if (!match) {
+    setStatus("No matching annotation found in the loaded GFF.", true);
+    return;
+  }
+  handleAnnotationPick(match);
+}
+
 function toggleAnnotationExpanded() {
   const state = store.getState();
   store.setState({
     annotationExpanded: !state.annotationExpanded,
+  });
+}
+
+function toggleLoadedFilesCollapsed() {
+  const state = store.getState();
+  store.setState({
+    loadedFilesCollapsed: !state.loadedFilesCollapsed,
   });
 }
 
@@ -1581,6 +1870,68 @@ async function applySession(payload, message = "Loaded local files") {
   }
 }
 
+async function restorePersistedSession(savedState) {
+  const savedSession = savedState?.session;
+  if (!savedSession?.reference) {
+    return false;
+  }
+
+  const payload = {
+    reference: savedSession.reference || "",
+    bams: savedSession.bams || [],
+    vcf: savedSession.vcf || "",
+    gff: savedSession.gff || "",
+  };
+
+  setStatus("Restoring previous session", false, { progress: 0.12, loading: true });
+  const session = await loadSession(payload);
+  if (!session.contigs || session.contigs.length === 0) {
+    throw new Error("Saved session could not be restored.");
+  }
+
+  updateContigOptions(session);
+  setSessionInputs(session);
+
+  const savedContig = session.contigs.find((contig) => contig.name === savedState.contig) || session.contigs[0];
+  const defaultEnd = Math.min(savedContig.length, DEFAULT_CONTIG_WINDOW_BASES);
+  const normalized = normalizeWindow(
+    savedContig.length,
+    Number(savedState.start) || 1,
+    Number(savedState.end) || defaultEnd
+  );
+  const palette = READ_COLOR_PALETTES[savedState.readColorPalette] ? savedState.readColorPalette : "default";
+
+  sharedScrollLeft = 0;
+  pendingCenterPosition = null;
+  applyReadPalette(palette);
+  store.setState({
+    session,
+    contig: savedContig.name,
+    contigLength: savedContig.length,
+    start: normalized.start,
+    end: normalized.end,
+    reference: null,
+    alignments: null,
+    variants: [],
+    nearbyVariants: [],
+    annotations: [],
+    selectedVariant: null,
+    loadingReads: false,
+    loadingReadTracks: [],
+    autoLoadReads: Boolean(savedState.autoLoadReads),
+    alignmentSort: savedState.alignmentSort || "base",
+    alignmentGroup: savedState.alignmentGroup || "none",
+    coverageLogScale: Boolean(savedState.coverageLogScale),
+    coverageBaseMix: Boolean(savedState.coverageBaseMix),
+    readColorPalette: palette,
+    annotationExpanded: Boolean(savedState.annotationExpanded),
+    loadedFilesCollapsed: Boolean(savedState.loadedFilesCollapsed),
+  });
+  setStatus("Restored previous session", false, { progress: 0.35, loading: true });
+  await refreshWindow();
+  return true;
+}
+
 function maxSharedScrollLeft() {
   const anchor = getHorizontalScrollers()[0];
   const contentWidth = anchor?.scrollWidth || 0;
@@ -1737,8 +2088,7 @@ function attachKeyboardShortcuts() {
 function attachEvents() {
   elements.goButton.addEventListener("click", () => {
     try {
-      const parsed = parseLocus(elements.locusInput.value);
-      updateWindow({ start: parsed.start, end: parsed.end }, parsed.contig);
+      commitNavigationInputs();
     } catch (error) {
       setStatus(error.message, true);
     }
@@ -1757,6 +2107,44 @@ function attachEvents() {
     }
     updateWindow({ start: 1, end: Math.min(contigMeta.length, DEFAULT_CONTIG_WINDOW_BASES) }, contig);
   });
+
+  elements.startInput.addEventListener("input", () => {
+    updateLocusInputFromCoordinateFields();
+  });
+  elements.endInput.addEventListener("input", () => {
+    updateLocusInputFromCoordinateFields();
+  });
+
+  [elements.startInput, elements.endInput, elements.locusInput].forEach((input) => {
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      elements.goButton.click();
+    });
+  });
+
+  if (elements.featureSearchInput) {
+    elements.featureSearchInput.addEventListener("input", () => {
+      queueAnnotationSuggestions(elements.featureSearchInput.value);
+    });
+    elements.featureSearchInput.addEventListener("focus", () => {
+      queueAnnotationSuggestions(elements.featureSearchInput.value);
+    });
+    elements.featureSearchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      void jumpToAnnotationSearch();
+    });
+    elements.featureSearchInput.addEventListener("change", () => {
+      if (elements.featureSearchInput.value.trim()) {
+        void jumpToAnnotationSearch();
+      }
+    });
+  }
 
   elements.homeButton.addEventListener("click", () => {
     const state = store.getState();
@@ -1790,6 +2178,9 @@ function attachEvents() {
   elements.annotationToggleButton.addEventListener("click", () => {
     toggleAnnotationExpanded();
   });
+  elements.loadedFilesToggleButton.addEventListener("click", () => {
+    toggleLoadedFilesCollapsed();
+  });
 
   attachDropZone();
   attachKeyboardShortcuts();
@@ -1801,6 +2192,17 @@ async function initialize() {
   try {
     attachEvents();
     applyReadPalette(store.getState().readColorPalette);
+    const savedState = readPersistedAppState();
+    if (savedState) {
+      try {
+        const restored = await restorePersistedSession(savedState);
+        if (restored) {
+          return;
+        }
+      } catch {
+        // Fall back to demo manifest if the saved session cannot be restored.
+      }
+    }
     setStatus("Loading demo manifest", false, { progress: 0.08, loading: true });
     const manifest = await fetchManifest();
     if (!manifest.contigs || manifest.contigs.length === 0) {
@@ -1834,5 +2236,8 @@ async function initialize() {
   }
 }
 
-store.subscribe(render);
+store.subscribe((state) => {
+  render(state);
+  persistAppState(state);
+});
 initialize();

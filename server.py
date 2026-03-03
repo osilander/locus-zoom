@@ -1097,14 +1097,22 @@ class VariantStore:
 @dataclass
 class AnnotationStore:
     features_by_contig: Dict[str, List[Dict]]
+    _cache_key = None
+    _cache_store = None
 
     @classmethod
     def load_gff(cls, path: Optional[Path]):
         if not path or not path.exists():
             return cls(features_by_contig={})
 
+        resolved = path.resolve()
+        stat = resolved.stat()
+        cache_key = (str(resolved), stat.st_mtime_ns, stat.st_size)
+        if cls._cache_key == cache_key and cls._cache_store is not None:
+            return cls._cache_store
+
         features_by_contig: Dict[str, List[Dict]] = {}
-        with path.open() as handle:
+        with resolved.open() as handle:
             for raw_line in handle:
                 line = raw_line.strip()
                 if not line or line.startswith("#"):
@@ -1136,11 +1144,47 @@ class AnnotationStore:
                 )
         for records in features_by_contig.values():
             records.sort(key=lambda item: (item["start"], item["end"]))
-        return cls(features_by_contig=features_by_contig)
+        store = cls(features_by_contig=features_by_contig)
+        cls._cache_key = cache_key
+        cls._cache_store = store
+        return store
 
     def query(self, contig: str, start: int, end: int) -> List[Dict]:
         records = self.features_by_contig.get(contig, [])
         return [record for record in records if record["end"] >= start and record["start"] <= end]
+
+    def search(self, term: str, limit: int = 20) -> List[Dict]:
+        query = term.strip().lower()
+        if limit <= 0:
+            return []
+
+        matches = []
+        seen = set()
+        for contig, records in self.features_by_contig.items():
+            for record in records:
+                label = (record.get("label") or "").strip()
+                if not label:
+                    continue
+                label_lower = label.lower()
+                if query:
+                    if label_lower == query:
+                        rank = 0
+                    elif label_lower.startswith(query):
+                        rank = 1
+                    elif query in label_lower:
+                        rank = 2
+                    else:
+                        continue
+                else:
+                    rank = 3
+                key = (contig, record["start"], record["end"], label, record.get("type"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append((rank, label_lower, record["start"], record))
+
+        matches.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[3] for item in matches[:limit]]
 
 
 @dataclass
@@ -1251,6 +1295,10 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/annotations" and method == "GET":
                 self.handle_annotations(parsed)
+                return
+
+            if parsed.path == "/api/annotations/search" and method == "GET":
+                self.handle_annotation_search(parsed)
                 return
 
             if parsed.path == "/api/alphagenome/analyze" and method == "POST":
@@ -1375,6 +1423,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                             end,
                             bins,
                         )
+                    elif available_backend() != "pysam":
+                        all_reads = read_alignment_records(bam, contig, start, end)
+                        coverage = compute_coverage(all_reads, start, end)
                     else:
                         coverage = read_depth_coverage(bam, contig, start, end)
                 else:
@@ -1434,6 +1485,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "start": start,
                 "end": end,
                 "annotations": annotations.query(contig, start, end),
+            }
+        )
+
+    def handle_annotation_search(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        term = query.get("q", [""])[0]
+        limit = max(1, min(50, int(query.get("limit", ["20"])[0])))
+        annotations = AnnotationStore.load_gff(SESSION.gff)
+        matches = annotations.search(term, limit)
+        self.write_json(
+            {
+                "query": term,
+                "matches": matches,
             }
         )
 
