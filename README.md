@@ -2,6 +2,8 @@
 
 Desktop-oriented genome viewer prototype with a web UI and a lightweight local Python API.
 
+![Locus Zoom screenshot](images/locus-zoom-screenshot.png)
+
 ## Quick Start
 
 For a new user, the simplest path is:
