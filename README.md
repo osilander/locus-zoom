@@ -59,13 +59,11 @@ This MVP covers three linked workflows:
 
 For large or remote BAMs, the viewer is intentionally coverage-first:
 
-- the session opens without loading read piles automatically
-- coverage loads before reads
+- the session opens in coverage mode
+- reads are fetched only when you click `Load Reads`, one BAM at a time
+- users can opt into `Auto Reads` when a BAM is small or fast enough
 - coverage defaults to solid bars, with fractional base colors shown only at polymorphic sites
 - users can switch to full `Coverage: Base Mix` when they want all exact bars colored by base fraction
-- reads are fetched only when you click `Load Reads`
-- reads can be loaded per BAM track, so one slow BAM does not block every track
-- users can opt into `Auto Reads` when a BAM is small or fast enough
 - read fetches time out after 10 seconds so the UI does not hang indefinitely on slow storage
 - the browser remembers the last session and view across refreshes when local storage is available
 
@@ -80,7 +78,7 @@ The repository now also includes a first-pass Tauri shell scaffold in `src-tauri
 
 If you want to run the pieces manually instead of using `launch.py`:
 
-1. Clone the repository and change into it.
+1. Make sure you are already in the cloned repository.
 2. Install the dependency.
 3. Generate demo data.
 4. Start the app.
@@ -107,8 +105,7 @@ py -3 server.py
 ```
 
 Or, if you want the manual steps broken out:
-
-1. Generate demo data.
+- Generate demo data:
 
 macOS / Linux:
 
@@ -122,7 +119,7 @@ Windows:
 py -3 scripts\generate_demo_data.py
 ```
 
-2. Start the app.
+- Start the app:
 
 macOS / Linux:
 
@@ -195,11 +192,11 @@ The BAMs are synthetic long-read demos and load as three tracks by default so th
 - single reference assembly at a time
 - three demo BAMs, one demo VCF, and one demo GFF wired by default
 - live local session loading by file path
-- coverage-first navigation with manual `Load Reads` for the current locus
-- per-BAM `Load Reads` so only the selected BAM needs to parse reads
+- coverage-first navigation with manual per-BAM `Load Reads`
 - optional `Auto Reads` mode for smaller / faster BAMs
 - 10 second timeout on read fetches for slow or remote BAM access
 - overlap-aware reuse of recent reference and exact coverage windows
+- switchable `Coverage: Solid` and `Coverage: Base Mix` display modes
 - read-state legend plus switchable read color palettes in the alignment controls
 - collapsed-by-default annotation lane with optional 20-row expanded packing
 - genome-wide GFF feature lookup with autocomplete and jump-to-feature navigation
