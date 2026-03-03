@@ -311,7 +311,7 @@ export function renderCoverage(canvas, coverage, variants, selectedVariant, wind
     T: "#ffbfde",
     N: "#cdd6e8",
   };
-  const solidBarColor = "#60c4e9";
+  const solidBarColor = "#9fc4d8";
   const polymorphismAccent = "#27455f";
 
   coverage.forEach((point) => {
