@@ -70,9 +70,13 @@ const elements = {
   loadedFilesToggleButton: document.querySelector("#loaded-files-toggle-button"),
   dropZone: document.querySelector("#drop-zone"),
   referencePathInput: document.querySelector("#reference-path-input"),
+  referencePathSuggestions: document.querySelector("#reference-path-suggestions"),
   bamPathInput: document.querySelector("#bam-path-input"),
+  bamRecentPaths: document.querySelector("#bam-recent-paths"),
   vcfPathInput: document.querySelector("#vcf-path-input"),
+  vcfPathSuggestions: document.querySelector("#vcf-path-suggestions"),
   gffPathInput: document.querySelector("#gff-path-input"),
+  gffPathSuggestions: document.querySelector("#gff-path-suggestions"),
   loadDataButton: document.querySelector("#load-data-button"),
   confirmModal: document.querySelector("#confirm-modal"),
   confirmModalTitle: document.querySelector("#confirm-modal-title"),
@@ -100,6 +104,8 @@ const DEFAULT_CONTIG_WINDOW_BASES = 100000;
 const WINDOW_CACHE_LIMIT = 18;
 const REFRESH_DEBOUNCE_MS = 90;
 const APP_STATE_STORAGE_KEY = "locus-zoom:app-state";
+const RECENT_PATHS_STORAGE_KEY = "locus-zoom:recent-paths";
+const RECENT_PATH_LIMIT = 10;
 const windowCache = {
   reference: new Map(),
   coverage: new Map(),
@@ -156,6 +162,119 @@ function readPersistedAppState() {
   } catch {
     return null;
   }
+}
+
+function readRecentPaths() {
+  try {
+    const raw = window.localStorage.getItem(RECENT_PATHS_STORAGE_KEY);
+    if (!raw) {
+      return {
+        reference: [],
+        bams: [],
+        vcf: [],
+        gff: [],
+      };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      reference: Array.isArray(parsed.reference) ? parsed.reference : [],
+      bams: Array.isArray(parsed.bams) ? parsed.bams : [],
+      vcf: Array.isArray(parsed.vcf) ? parsed.vcf : [],
+      gff: Array.isArray(parsed.gff) ? parsed.gff : [],
+    };
+  } catch {
+    return {
+      reference: [],
+      bams: [],
+      vcf: [],
+      gff: [],
+    };
+  }
+}
+
+function persistRecentPaths(recentPaths) {
+  try {
+    window.localStorage.setItem(RECENT_PATHS_STORAGE_KEY, JSON.stringify(recentPaths));
+  } catch {
+    // Ignore localStorage failures and continue normally.
+  }
+}
+
+function dedupeRecentPaths(values) {
+  return [...new Set(
+    (values || [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )].slice(0, RECENT_PATH_LIMIT);
+}
+
+function updateRecentPathsFromSession(session) {
+  if (!session) {
+    return;
+  }
+  const current = readRecentPaths();
+  const next = {
+    reference: dedupeRecentPaths([session.reference, ...current.reference]),
+    bams: dedupeRecentPaths([...(session.bams || []), ...current.bams]),
+    vcf: dedupeRecentPaths([session.vcf, ...current.vcf]),
+    gff: dedupeRecentPaths([session.gff, ...current.gff]),
+  };
+  persistRecentPaths(next);
+  renderRecentPathSuggestions(next);
+}
+
+function fillDatalist(target, values) {
+  if (!target) {
+    return;
+  }
+  target.replaceChildren(
+    ...dedupeRecentPaths(values).map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    })
+  );
+}
+
+function addBamRecentPath(path) {
+  const normalized = String(path || "").trim();
+  if (!normalized) {
+    return;
+  }
+  const existing = elements.bamPathInput.value
+    .split("\n")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (existing.includes(normalized)) {
+    return;
+  }
+  elements.bamPathInput.value = existing.length
+    ? `${elements.bamPathInput.value.trim()}\n${normalized}`
+    : normalized;
+}
+
+function renderRecentPathSuggestions(recentPaths = readRecentPaths()) {
+  fillDatalist(elements.referencePathSuggestions, recentPaths.reference);
+  fillDatalist(elements.vcfPathSuggestions, recentPaths.vcf);
+  fillDatalist(elements.gffPathSuggestions, recentPaths.gff);
+
+  if (!elements.bamRecentPaths) {
+    return;
+  }
+
+  const bamPaths = dedupeRecentPaths(recentPaths.bams);
+  elements.bamRecentPaths.hidden = bamPaths.length === 0;
+  elements.bamRecentPaths.replaceChildren(
+    ...bamPaths.map((path) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "track-inline-button";
+      button.textContent = path;
+      button.title = "Add this recent BAM / CRAM path";
+      button.addEventListener("click", () => addBamRecentPath(path));
+      return button;
+    })
+  );
 }
 
 function persistAppState(state = store.getState()) {
@@ -1832,6 +1951,7 @@ async function applySession(payload, message = "Loaded local files") {
     const session = await loadSession(payload);
     updateContigOptions(session);
     setSessionInputs(session);
+    updateRecentPathsFromSession(session);
     const firstContig = session.contigs[0];
     const initialEnd = Math.min(firstContig.length, DEFAULT_CONTIG_WINDOW_BASES);
     sharedScrollLeft = 0;
@@ -1891,6 +2011,7 @@ async function restorePersistedSession(savedState) {
 
   updateContigOptions(session);
   setSessionInputs(session);
+  updateRecentPathsFromSession(session);
 
   const savedContig = session.contigs.find((contig) => contig.name === savedState.contig) || session.contigs[0];
   const defaultEnd = Math.min(savedContig.length, DEFAULT_CONTIG_WINDOW_BASES);
@@ -2192,6 +2313,7 @@ async function initialize() {
   try {
     attachEvents();
     applyReadPalette(store.getState().readColorPalette);
+    renderRecentPathSuggestions();
     const savedState = readPersistedAppState();
     if (savedState) {
       try {

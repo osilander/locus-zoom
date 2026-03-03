@@ -32,19 +32,23 @@
         <div class="path-grid">
           <div class="control-group">
             <label for="reference-path-input">Reference FASTA</label>
-            <input id="reference-path-input" type="text" placeholder="/path/to/reference.fa" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.fa" />
+            <input id="reference-path-input" type="text" list="reference-path-suggestions" placeholder="/path/to/reference.fa" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.fa" />
+            <datalist id="reference-path-suggestions"></datalist>
           </div>
           <div class="control-group">
             <label for="bam-path-input">BAM / CRAM Files</label>
             <textarea id="bam-path-input" rows="3" placeholder="/path/to/sample-a.bam&#10;/path/to/sample-b.bam">/Users/osilande/Documents/New project/genome-explorer/data/demo.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_compare.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_third.bam</textarea>
+            <div id="bam-recent-paths" class="recent-path-list" hidden></div>
           </div>
           <div class="control-group">
             <label for="vcf-path-input">VCF</label>
-            <input id="vcf-path-input" type="text" placeholder="/path/to/sample.vcf" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.vcf" />
+            <input id="vcf-path-input" type="text" list="vcf-path-suggestions" placeholder="/path/to/sample.vcf" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.vcf" />
+            <datalist id="vcf-path-suggestions"></datalist>
           </div>
           <div class="control-group">
             <label for="gff-path-input">GFF / GFF3</label>
-            <input id="gff-path-input" type="text" placeholder="/path/to/annotations.gff3" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.gff3" />
+            <input id="gff-path-input" type="text" list="gff-path-suggestions" placeholder="/path/to/annotations.gff3" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.gff3" />
+            <datalist id="gff-path-suggestions"></datalist>
           </div>
           <div class="button-row">
             <button id="load-data-button">Load Local Files</button>

@@ -254,6 +254,20 @@ textarea {
   min-height: 88px;
 }
 
+.recent-path-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.recent-path-list .track-inline-button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 button {
   min-height: 44px;
   border: none;
