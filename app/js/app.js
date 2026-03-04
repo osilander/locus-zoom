@@ -2070,7 +2070,20 @@ function toggleLoadedFilesCollapsed() {
   });
 }
 
-function handleNavigatorJump(position) {
+function handleNavigatorJump(target) {
+  if (target && typeof target === "object") {
+    const start = Number(target.start);
+    const end = Number(target.end);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      updateWindow({ start, end });
+      return;
+    }
+  }
+
+  const position = Number(target);
+  if (!Number.isFinite(position)) {
+    return;
+  }
   const state = store.getState();
   const width = Math.max(state.end - state.start + 1, 1);
   const start = position - Math.floor(width / 2);

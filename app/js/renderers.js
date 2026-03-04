@@ -108,7 +108,7 @@ export function renderNavigator(canvas, navigatorState, onJump) {
     return Math.max(minCenter, Math.min(maxCenter, centerPosition));
   };
 
-  const drawNavigator = (centerPosition = null) => {
+  const drawNavigator = ({ centerPosition = null, selectionRange = null } = {}) => {
     ctx.clearRect(0, 0, width, height);
 
     ctx.strokeStyle = "rgba(69, 86, 66, 0.22)";
@@ -130,6 +130,18 @@ export function renderNavigator(canvas, navigatorState, onJump) {
     ctx.strokeStyle = "#2f89c6";
     ctx.lineWidth = 2;
     ctx.strokeRect(windowX, usableY - 12, windowWidth, 24);
+
+    if (selectionRange) {
+      const selectionStart = Math.max(1, Math.min(contigLength, selectionRange.start));
+      const selectionEnd = Math.max(selectionStart, Math.min(contigLength, selectionRange.end));
+      const selectionX = 10 + (selectionStart - 1) * scale;
+      const selectionWidth = Math.max((selectionEnd - selectionStart + 1) * scale, 2);
+      ctx.fillStyle = "rgba(193, 143, 47, 0.22)";
+      ctx.fillRect(selectionX, usableY - 16, selectionWidth, 32);
+      ctx.strokeStyle = "rgba(150, 96, 22, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(selectionX, usableY - 16, selectionWidth, 32);
+    }
 
     variants.forEach((variant) => {
       const x = 10 + (variant.position - 1) * scale;
@@ -159,12 +171,45 @@ export function renderNavigator(canvas, navigatorState, onJump) {
 
   canvas.onmousedown = (event) => {
     event.preventDefault();
-    let currentPosition = positionFromEvent(event);
-    drawNavigator(currentPosition);
+    const dragStartPosition = positionFromEvent(event);
+    const currentWindowX = 10 + (start - 1) * scale;
+    const currentWindowWidth = Math.max(windowBaseCount * scale, 4);
+    const windowY0 = usableY - 12;
+    const windowY1 = usableY + 12;
+    const localX = event.clientX - canvas.getBoundingClientRect().left;
+    const localY = event.clientY - canvas.getBoundingClientRect().top;
+    const isInsideCurrentWindow = (
+      localX >= currentWindowX
+      && localX <= currentWindowX + currentWindowWidth
+      && localY >= windowY0
+      && localY <= windowY1
+    );
+    let currentPosition = dragStartPosition;
+    let selectionEndPosition = dragStartPosition;
+    if (isInsideCurrentWindow) {
+      drawNavigator({ centerPosition: currentPosition });
+    } else {
+      drawNavigator({
+        selectionRange: {
+          start: Math.min(dragStartPosition, selectionEndPosition),
+          end: Math.max(dragStartPosition, selectionEndPosition),
+        },
+      });
+    }
 
     const handleMove = (moveEvent) => {
       currentPosition = positionFromEvent(moveEvent);
-      drawNavigator(currentPosition);
+      if (isInsideCurrentWindow) {
+        drawNavigator({ centerPosition: currentPosition });
+      } else {
+        selectionEndPosition = currentPosition;
+        drawNavigator({
+          selectionRange: {
+            start: Math.min(dragStartPosition, selectionEndPosition),
+            end: Math.max(dragStartPosition, selectionEndPosition),
+          },
+        });
+      }
     };
 
     const handleUp = () => {
@@ -172,7 +217,20 @@ export function renderNavigator(canvas, navigatorState, onJump) {
       window.removeEventListener("mouseup", handleUp);
       window.removeEventListener("mouseleave", handleUp);
       canvas._navigatorCleanup = null;
-      onJump(currentPosition);
+      if (isInsideCurrentWindow) {
+        onJump(currentPosition);
+        return;
+      }
+      const selectionStart = Math.min(dragStartPosition, selectionEndPosition);
+      const selectionEnd = Math.max(dragStartPosition, selectionEndPosition);
+      if (selectionEnd - selectionStart < 2) {
+        onJump(currentPosition);
+        return;
+      }
+      onJump({
+        start: selectionStart,
+        end: selectionEnd,
+      });
     };
 
     window.addEventListener("mousemove", handleMove);
