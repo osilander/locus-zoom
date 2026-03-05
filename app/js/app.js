@@ -72,10 +72,10 @@ const elements = {
   sessionDetail: document.querySelector("#session-detail"),
   loadedFilesToggleButton: document.querySelector("#loaded-files-toggle-button"),
   dropZone: document.querySelector("#drop-zone"),
+  workingDirInput: document.querySelector("#working-dir-input"),
   referencePathInput: document.querySelector("#reference-path-input"),
   referencePathSuggestions: document.querySelector("#reference-path-suggestions"),
   bamPathInput: document.querySelector("#bam-path-input"),
-  bamRecentPaths: document.querySelector("#bam-recent-paths"),
   vcfPathInput: document.querySelector("#vcf-path-input"),
   vcfPathSuggestions: document.querySelector("#vcf-path-suggestions"),
   gffPathInput: document.querySelector("#gff-path-input"),
@@ -187,6 +187,7 @@ function buildCanonicalSessionDocument(state = store.getState()) {
     version: SESSION_SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
     data: {
+      workingDir: state.session.workingDir || "",
       reference: state.session.reference || "",
       bams: state.session.bams || (state.session.bam ? [state.session.bam] : []),
       vcf: state.session.vcf || "",
@@ -238,6 +239,7 @@ function migrateSessionDocument(raw) {
       version: SESSION_SCHEMA_VERSION,
       savedAt: new Date().toISOString(),
       data: {
+        workingDir: raw.session.workingDir || "",
         reference: raw.session.reference || "",
         bams: raw.session.bams || (raw.session.bam ? [raw.session.bam] : []),
         vcf: raw.session.vcf || "",
@@ -421,70 +423,10 @@ function fillDatalist(target, values) {
   );
 }
 
-function addBamRecentPath(path) {
-  const normalized = String(path || "").trim();
-  if (!normalized) {
-    return;
-  }
-  const lines = elements.bamPathInput.value.split("\n");
-  const existing = lines
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (existing.includes(normalized)) {
-    return;
-  }
-  const lastLine = lines.length ? lines[lines.length - 1].trim() : "";
-  if (!lastLine) {
-    const committed = lines
-      .slice(0, -1)
-      .map((value) => value.trim())
-      .filter(Boolean);
-    elements.bamPathInput.value = [...committed, normalized].join("\n");
-  } else if (!existing.includes(lastLine)) {
-    const committed = lines
-      .slice(0, -1)
-      .map((value) => value.trim())
-      .filter(Boolean);
-    elements.bamPathInput.value = [...committed, normalized].join("\n");
-  } else {
-    elements.bamPathInput.value = `${elements.bamPathInput.value.trim()}\n${normalized}`;
-  }
-  renderRecentPathSuggestions();
-}
-
 function renderRecentPathSuggestions(recentPaths = readRecentPaths()) {
   fillDatalist(elements.referencePathSuggestions, recentPaths.reference);
   fillDatalist(elements.vcfPathSuggestions, recentPaths.vcf);
   fillDatalist(elements.gffPathSuggestions, recentPaths.gff);
-
-  if (!elements.bamRecentPaths) {
-    return;
-  }
-
-  const bamPaths = dedupeRecentPaths(recentPaths.bams);
-  const currentBams = new Set(
-    elements.bamPathInput.value
-      .split("\n")
-      .map((value) => value.trim())
-      .filter(Boolean)
-  );
-  const bamLines = elements.bamPathInput.value.split("\n");
-  const activeFragment = (bamLines.length ? bamLines[bamLines.length - 1] : "").trim();
-  const suggestedBams = activeFragment && !currentBams.has(activeFragment)
-    ? bamPaths.filter((path) => !currentBams.has(path) && path.toLowerCase().includes(activeFragment.toLowerCase()))
-    : bamPaths.filter((path) => !currentBams.has(path));
-  elements.bamRecentPaths.hidden = suggestedBams.length === 0;
-  elements.bamRecentPaths.replaceChildren(
-    ...suggestedBams.map((path) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "track-inline-button";
-      button.textContent = path;
-      button.title = "Add this recent BAM / CRAM path";
-      button.addEventListener("click", () => addBamRecentPath(path));
-      return button;
-    })
-  );
 }
 
 function persistAppState(state = store.getState()) {
@@ -769,6 +711,7 @@ function scheduleRefresh(immediate = false) {
 }
 
 function setSessionInputs(session) {
+  elements.workingDirInput.value = session.workingDir || "";
   elements.referencePathInput.value = session.reference || "";
   elements.bamPathInput.value = (session.bams || (session.bam ? [session.bam] : [])).join("\n");
   elements.vcfPathInput.value = session.vcf || "";
@@ -2139,6 +2082,7 @@ function stepToVariant(direction) {
 
 function buildSessionPayload() {
   return {
+    workingDir: elements.workingDirInput.value,
     reference: elements.referencePathInput.value,
     bam: elements.bamPathInput.value,
     vcf: elements.vcfPathInput.value,
@@ -2286,6 +2230,7 @@ async function applyCanonicalSessionDocument(sessionDocument, options = {}) {
   }
   const { statusMessage = "Loaded session", progress = 0.12 } = options;
   const payload = {
+    workingDir: document.data.workingDir || "",
     reference: document.data.reference || "",
     bams: document.data.bams || [],
     vcf: document.data.vcf || "",
@@ -2652,10 +2597,6 @@ function attachEvents() {
     } catch (error) {
       setStatus(error.message, true);
     }
-  });
-
-  elements.bamPathInput.addEventListener("input", () => {
-    renderRecentPathSuggestions();
   });
 
   elements.contigSelect.addEventListener("change", () => {

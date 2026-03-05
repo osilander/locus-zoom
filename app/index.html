@@ -32,14 +32,13 @@
         </div>
         <div class="path-grid">
           <div class="control-group">
+            <label for="working-dir-input">Working Directory (optional)</label>
+            <input id="working-dir-input" type="text" placeholder="/path/to/project-or-mount-root" />
+          </div>
+          <div class="control-group">
             <label for="reference-path-input">Reference FASTA</label>
             <input id="reference-path-input" type="text" list="reference-path-suggestions" placeholder="/path/to/reference.fa" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.fa" />
             <datalist id="reference-path-suggestions"></datalist>
-          </div>
-          <div class="control-group">
-            <label for="bam-path-input">BAM / CRAM Files</label>
-            <textarea id="bam-path-input" rows="3" placeholder="/path/to/sample-a.bam&#10;/path/to/sample-b.bam">/Users/osilande/Documents/New project/genome-explorer/data/demo.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_compare.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_third.bam</textarea>
-            <div id="bam-recent-paths" class="recent-path-list" hidden></div>
           </div>
           <div class="control-group">
             <label for="vcf-path-input">VCF</label>
@@ -51,7 +50,11 @@
             <input id="gff-path-input" type="text" list="gff-path-suggestions" placeholder="/path/to/annotations.gff3" value="/Users/osilande/Documents/New project/genome-explorer/data/demo.gff3" />
             <datalist id="gff-path-suggestions"></datalist>
           </div>
-          <div class="button-row">
+          <div class="control-group path-span-2">
+            <label for="bam-path-input">BAM / CRAM Files</label>
+            <textarea id="bam-path-input" rows="3" placeholder="/path/to/sample-a.bam&#10;/path/to/sample-b.bam">/Users/osilande/Documents/New project/genome-explorer/data/demo.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_compare.bam&#10;/Users/osilande/Documents/New project/genome-explorer/data/demo_third.bam</textarea>
+          </div>
+          <div class="button-row path-span-2">
             <button id="load-data-button">Load Local Files</button>
             <button id="export-session-button" type="button" class="secondary-button">Export Session</button>
             <button id="import-session-button" type="button" class="secondary-button">Import Session</button>

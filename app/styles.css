@@ -215,6 +215,10 @@ h2 {
   gap: 6px;
 }
 
+.path-span-2 {
+  grid-column: 1 / -1;
+}
+
 .control-group.compact {
   max-width: 120px;
 }
@@ -252,20 +256,6 @@ select {
 textarea {
   resize: vertical;
   min-height: 88px;
-}
-
-.recent-path-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.recent-path-list .track-inline-button {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 button {

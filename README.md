@@ -88,6 +88,10 @@ You can use the buttons in the file intake area to:
 - `Import Session` to restore a previously saved JSON session
 - `Copy Share Link` to copy a URL that embeds the current session state
 
+For local file loading, the intake panel also supports an optional `Working Directory`.
+When set, relative paths entered for FASTA/BAM/VCF/GFF are resolved against that directory.
+Absolute paths continue to work as-is.
+
 The app also supports loading a session from the URL:
 
 - `?session=...` for an embedded encoded session

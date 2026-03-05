@@ -66,7 +66,22 @@ def resolve_configured_path(value: Optional[str]) -> Optional[Path]:
     return (DATA_DIR / value).resolve()
 
 
-def parse_alignment_payload(payload: Dict) -> List[Path]:
+def resolve_working_directory(value: Optional[str]) -> Optional[Path]:
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def resolve_user_path(value: str, working_dir: Optional[Path]) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    if working_dir:
+        return (working_dir / candidate).resolve()
+    return candidate.resolve()
+
+
+def parse_alignment_payload(payload: Dict, working_dir: Optional[Path] = None) -> List[Path]:
     if "bams" in payload:
         raw_values = payload.get("bams") or []
         if not isinstance(raw_values, list):
@@ -75,7 +90,7 @@ def parse_alignment_payload(payload: Dict) -> List[Path]:
     else:
         raw_value = str(payload.get("bam") or "")
         values = [chunk.strip() for chunk in raw_value.replace("\r", "\n").replace(",", "\n").split("\n") if chunk.strip()]
-    return [Path(value).expanduser() for value in values]
+    return [resolve_user_path(value, working_dir) for value in values]
 
 
 def parse_info_string(info: str) -> Dict[str, str]:
@@ -585,6 +600,7 @@ def build_validated_snapshot(session: "SessionConfig") -> Dict:
         "bams": [str(path) for path in bam_paths],
         "vcf": str(vcf_path) if vcf_path else None,
         "gff": str(gff_path) if gff_path else None,
+        "workingDir": str(session.working_dir) if session.working_dir else None,
         "contigs": contig_entries,
     }
 
@@ -616,6 +632,7 @@ def build_lightweight_snapshot(session: "SessionConfig") -> Dict:
         "bams": [str(path) for path in bam_paths],
         "vcf": str(vcf_path) if vcf_path else None,
         "gff": str(gff_path) if gff_path else None,
+        "workingDir": str(session.working_dir) if session.working_dir else None,
         "contigs": contig_entries,
     }
 
@@ -1302,6 +1319,7 @@ class SessionConfig:
     bams: List[Path] = None
     vcf: Optional[Path] = None
     gff: Optional[Path] = None
+    working_dir: Optional[Path] = None
 
     @classmethod
     def from_manifest(cls):
@@ -1314,6 +1332,7 @@ class SessionConfig:
             bams=[resolve_configured_path(path) for path in configured_bams if path],
             vcf=resolve_configured_path(manifest.get("vcf")),
             gff=resolve_configured_path(manifest.get("gff")),
+            working_dir=DATA_DIR.resolve(),
         )
 
     def with_updates(self, payload: Dict) -> "SessionConfig":
@@ -1322,12 +1341,19 @@ class SessionConfig:
             bams=list(self.bams or []),
             vcf=self.vcf,
             gff=self.gff,
+            working_dir=self.working_dir,
         )
+        if "workingDir" in payload:
+            next_session.working_dir = resolve_working_directory(payload.get("workingDir"))
         for key in ("reference", "vcf", "gff"):
             if key in payload:
-                setattr(next_session, key, Path(payload[key]).expanduser() if payload[key] else None)
+                setattr(
+                    next_session,
+                    key,
+                    resolve_user_path(payload[key], next_session.working_dir) if payload[key] else None,
+                )
         if "bam" in payload or "bams" in payload:
-            next_session.bams = parse_alignment_payload(payload)
+            next_session.bams = parse_alignment_payload(payload, next_session.working_dir)
         return next_session
 
     @property
@@ -1342,6 +1368,7 @@ class SessionConfig:
                 "bams": [str(path) for path in (self.bams or [])],
                 "vcf": str(self.vcf) if self.vcf else None,
                 "gff": str(self.gff) if self.gff else None,
+                "workingDir": str(self.working_dir) if self.working_dir else None,
                 "contigs": [],
             }
         return build_validated_snapshot(self)
